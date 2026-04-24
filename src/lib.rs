@@ -26,6 +26,7 @@ pub mod simd;
 pub mod checkpoints;
 pub mod keys;
 pub mod fees;
+pub mod messages;
 pub mod wallet;
 pub mod sync;
 pub mod sapling;

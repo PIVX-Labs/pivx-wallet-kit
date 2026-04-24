@@ -127,8 +127,9 @@ pub fn get_transparent_address(mnemonic: &str) -> Result<String, Box<dyn Error>>
     Ok(address)
 }
 
-/// Convert a compressed public key to a PIVX transparent address (`D...`).
-fn pubkey_to_pivx_address(pubkey: &[u8]) -> String {
+/// Convert a compressed (or uncompressed) public key to a PIVX transparent
+/// address (`D...`).
+pub fn pubkey_to_pivx_address(pubkey: &[u8]) -> String {
     let sha_hash = Sha256::digest(pubkey);
     let pkh = Ripemd160::digest(sha_hash);
 

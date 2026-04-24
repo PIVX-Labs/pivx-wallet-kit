@@ -290,6 +290,38 @@ pub fn format_sat_to_piv(sat: u64) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// PIVX Core-compatible message signing (auth, attestations, etc.)
+// ---------------------------------------------------------------------------
+
+/// Sign `message` with a wallet's transparent private key derived from the
+/// given mnemonic at `m/44'/119'/0'/0/0`. Returns a base64 signature
+/// compatible with PIVX Core's `verifymessage` RPC.
+///
+/// Convenience wrapper around the kit's lower-level `messages::sign_message`
+/// for browser consumers that already have a mnemonic in hand.
+#[wasm_bindgen]
+pub fn sign_message_with_mnemonic(mnemonic: &str, message: &str) -> Result<String, JsError> {
+    let parsed = bip39::Mnemonic::parse_normalized(mnemonic).map_err(to_js_err)?;
+    let bip39_seed = parsed.to_seed("");
+    let (_addr, _pk, privkey) =
+        crate::keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 0).map_err(to_js_err)?;
+    let mut key32 = [0u8; 32];
+    key32.copy_from_slice(&privkey);
+    let sig = crate::messages::sign_message(&key32, message).map_err(to_js_err)?;
+    Ok(sig)
+}
+
+/// Verify a PIVX Core-format signature against the claimed address.
+#[wasm_bindgen]
+pub fn verify_message(
+    address: &str,
+    message: &str,
+    signature_b64: &str,
+) -> Result<bool, JsError> {
+    crate::messages::verify_message(address, message, signature_b64).map_err(to_js_err)
+}
+
+// ---------------------------------------------------------------------------
 // Explorer adapters
 // ---------------------------------------------------------------------------
 
