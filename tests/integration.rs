@@ -255,6 +255,102 @@ fn wallet_reset_to_checkpoint_clears_state() {
 }
 
 // ---------------------------------------------------------------------------
+// Amount parsing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_piv_basic_cases() {
+    use amount::parse_piv_to_sat;
+    assert_eq!(parse_piv_to_sat("1").unwrap(), 100_000_000);
+    assert_eq!(parse_piv_to_sat("0.00000001").unwrap(), 1);
+    assert_eq!(parse_piv_to_sat("1.23456789").unwrap(), 123_456_789);
+    assert_eq!(parse_piv_to_sat("  10  ").unwrap(), 1_000_000_000);
+    assert_eq!(parse_piv_to_sat("1.").unwrap(), 100_000_000);
+    assert_eq!(parse_piv_to_sat("1.5").unwrap(), 150_000_000);
+}
+
+#[test]
+fn parse_piv_rejects_malformed() {
+    use amount::parse_piv_to_sat;
+    assert!(parse_piv_to_sat("").is_err());
+    assert!(parse_piv_to_sat("abc").is_err());
+    assert!(parse_piv_to_sat("1.2.3").is_err());
+    assert!(parse_piv_to_sat("1.123456789").is_err()); // 9 decimals
+    assert!(parse_piv_to_sat("1e10").is_err());
+}
+
+#[test]
+fn parse_piv_overflow() {
+    use amount::parse_piv_to_sat;
+    assert!(parse_piv_to_sat(&format!("{}", u64::MAX)).is_err());
+}
+
+#[test]
+fn format_sat_round_trips_through_parse() {
+    use amount::{format_sat_to_piv, parse_piv_to_sat};
+    for sat in [0u64, 1, 100, 100_000_000, 123_456_789, 1_000_000_000_000] {
+        let formatted = format_sat_to_piv(sat);
+        let round = parse_piv_to_sat(&formatted).unwrap();
+        assert_eq!(sat, round, "round-trip failed for {}", sat);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Blockbook UTXO parser
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_blockbook_utxos_handles_string_and_number_values() {
+    let raw = vec![
+        serde_json::json!({
+            "txid": "a".repeat(64),
+            "vout": 0,
+            "value": "500000000",
+            "height": 5_000_000,
+        }),
+        serde_json::json!({
+            "txid": "b".repeat(64),
+            "vout": 2,
+            "value": 100_000_000u64,
+            "height": 5_100_000,
+        }),
+    ];
+    let utxos = wallet::parse_blockbook_utxos(&raw);
+    assert_eq!(utxos.len(), 2);
+    assert_eq!(utxos[0].amount, 500_000_000);
+    assert_eq!(utxos[0].vout, 0);
+    assert_eq!(utxos[1].amount, 100_000_000);
+    assert_eq!(utxos[1].vout, 2);
+}
+
+#[test]
+fn parse_blockbook_utxos_skips_zero_and_empty() {
+    let raw = vec![
+        serde_json::json!({
+            "txid": "",
+            "vout": 0,
+            "value": "100",
+            "height": 1000,
+        }),
+        serde_json::json!({
+            "txid": "c".repeat(64),
+            "vout": 0,
+            "value": "0",
+            "height": 1000,
+        }),
+        serde_json::json!({
+            "txid": "d".repeat(64),
+            "vout": 1,
+            "value": "42",
+            "height": 2000,
+        }),
+    ];
+    let utxos = wallet::parse_blockbook_utxos(&raw);
+    assert_eq!(utxos.len(), 1);
+    assert_eq!(utxos[0].amount, 42);
+}
+
+// ---------------------------------------------------------------------------
 // Fees
 // ---------------------------------------------------------------------------
 

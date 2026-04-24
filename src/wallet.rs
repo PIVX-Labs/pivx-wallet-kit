@@ -40,6 +40,42 @@ pub struct SerializedUTXO {
     pub height: u32,
 }
 
+/// Parse a list of UTXOs from a Blockbook API v2 `/api/v2/utxo/{address}` response.
+///
+/// Accepts amounts as either a string (`"12345"`) or a JSON number — both
+/// forms appear in the wild depending on the Blockbook revision. UTXOs with
+/// empty txids or zero amounts are skipped.
+///
+/// `script` is left empty because Blockbook doesn't always include scripts
+/// and consumers that need them can reconstruct P2PKH from the spending
+/// wallet's address.
+pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
+    let mut utxos = Vec::new();
+    for u in raw {
+        let txid = u["txid"].as_str().unwrap_or_default().to_string();
+        let vout = u["vout"].as_u64().unwrap_or(0) as u32;
+        let amount = u["value"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| u["value"].as_u64())
+            .unwrap_or(0);
+        let height = u["height"].as_u64().unwrap_or(0) as u32;
+
+        if txid.is_empty() || amount == 0 {
+            continue;
+        }
+
+        utxos.push(SerializedUTXO {
+            txid,
+            vout,
+            amount,
+            script: String::new(),
+            height,
+        });
+    }
+    utxos
+}
+
 /// Persistent wallet state.
 ///
 /// Sensitive fields (`seed`, `mnemonic`) are intended to be encrypted by the

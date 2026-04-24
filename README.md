@@ -1,5 +1,7 @@
 # PIVX Wallet Kit
 
+[![CI](https://github.com/PIVX-Labs/pivx-wallet-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/PIVX-Labs/pivx-wallet-kit/actions/workflows/ci.yml)
+
 Pure-Rust wallet primitives for [PIVX](https://pivx.org), with first-class Sapling shield support.
 
 Designed as the shared core that powers PIVX wallet clients — native CLIs, MCP servers, desktop apps, and embeddable web wallets — from a single audited codebase.
@@ -29,20 +31,21 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 | Module                          | Purpose                                                                    |
 |---------------------------------|----------------------------------------------------------------------------|
 | `params`                        | PIVX chain constants: coin type, prefixes, Sapling param SHA256 hashes     |
+| `amount`                        | PIV amount parsing / formatting (exact integer, no float)                  |
 | `checkpoints`                   | Embedded mainnet checkpoint data for fast initial sync                     |
 | `keys`                          | BIP32/BIP44 derivation, Sapling ZIP32 keys, transparent address encoding   |
 | `fees`                          | Component-based fee estimation for v3 and raw v1 transactions              |
-| `wallet`                        | In-memory `WalletData`, (de)serialization, symmetric secret encryption    |
+| `wallet`                        | In-memory `WalletData`, (de)serialization, symmetric secret encryption, Blockbook UTXO parser |
 | `sync`                          | Pure shield stream parser — bytes → block batches                          |
 | `sapling::sync`                 | `handle_blocks`: decrypt notes, advance tree, extract nullifiers           |
-| `sapling::tree`                 | Commitment tree root extraction and comparison                             |
+| `sapling::tree`                 | Commitment tree root extraction and empty-tree helpers                     |
 | `sapling::prover`               | SHA256-verified proving parameter loader (consumer supplies bytes)         |
 | `sapling::builder`              | Shield → anything transaction builder                                      |
-| `transparent::builder`          | v3 transparent builder (supports t → shield) + raw v1 P2PKH builder        |
+| `transparent::builder`          | `create_shielding_transaction` (t → shield) + `create_raw_transparent_transaction` (canonical entry — no prover needed for transparent dests) |
 | `transparent::tx`               | Low-level varint helpers                                                   |
 | `transparent::utxo`             | `Utxo` alias                                                               |
 | `simd::hex`                     | SIMD-accelerated hex encoding (NEON/AVX2/SSE2/scalar)                      |
-| `wasm` *(wasm32 only)*          | `#[wasm_bindgen]` exports + thread-local Sapling prover cell              |
+| `wasm` *(wasm32 only)*          | `#[wasm_bindgen]` exports + process-global Sapling prover cell             |
 
 ## Building
 

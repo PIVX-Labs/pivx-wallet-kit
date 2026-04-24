@@ -20,6 +20,7 @@
 //! | [`sapling`]     | Sapling shield keys, notes, tree, tx building |
 //! | [`transparent`] | Transparent tx building, UTXO management |
 
+pub mod amount;
 pub mod params;
 pub mod simd;
 pub mod checkpoints;
