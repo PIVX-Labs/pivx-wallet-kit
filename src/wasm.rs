@@ -273,3 +273,34 @@ pub fn estimate_fee(
         sapling_output_count,
     )
 }
+
+// ---------------------------------------------------------------------------
+// Amount helpers
+// ---------------------------------------------------------------------------
+
+/// Parse a PIV amount string (e.g. `"1.23456789"`) into satoshis.
+#[wasm_bindgen]
+pub fn parse_piv_to_sat(s: &str) -> Result<u64, JsError> {
+    crate::amount::parse_piv_to_sat(s).map_err(|e| JsError::new(&e))
+}
+
+/// Format a satoshi amount as a PIV string with 8 decimal places.
+#[wasm_bindgen]
+pub fn format_sat_to_piv(sat: u64) -> String {
+    crate::amount::format_sat_to_piv(sat)
+}
+
+// ---------------------------------------------------------------------------
+// Explorer adapters
+// ---------------------------------------------------------------------------
+
+/// Convert a Blockbook API v2 `/api/v2/utxo/{address}` response into
+/// `Vec<SerializedUTXO>`. Handy for browser wallets fetching UTXOs directly
+/// from a Blockbook endpoint.
+#[wasm_bindgen]
+pub fn parse_blockbook_utxos(raw: JsValue) -> Result<JsValue, JsError> {
+    let raw: Vec<serde_json::Value> =
+        serde_wasm_bindgen::from_value(raw).map_err(to_js_err)?;
+    let utxos = crate::wallet::parse_blockbook_utxos(&raw);
+    serde_wasm_bindgen::to_value(&utxos).map_err(to_js_err)
+}

@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PIVX Wallet Kit — tiny demo</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #a78bfa;
+      --button: #7c3aed;
+      --button-hover: #6d28d9;
+    }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+      max-width: 760px;
+      margin: 2em auto;
+      padding: 0 1em;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    h1, h2 { color: var(--accent); margin-top: 0; }
+    h1 { font-size: 1.6rem; }
+    h2 { font-size: 1.15rem; }
+    a { color: var(--accent); }
+    .section {
+      margin: 1.25em 0;
+      padding: 1em 1.25em;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    button {
+      background: var(--button);
+      color: white;
+      border: 0;
+      padding: 0.5em 1em;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      margin: 0.25em 0.25em 0.25em 0;
+    }
+    button:hover { background: var(--button-hover); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    textarea, input {
+      background: #0f172a;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.6em;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.9rem;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    textarea { min-height: 4.5em; resize: vertical; }
+    .addr { word-break: break-all; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.85rem; background: #0f172a; padding: 0.5em; border-radius: 6px; border: 1px solid var(--border); }
+    .label { color: var(--muted); font-size: 0.8rem; margin: 0.75em 0 0.25em; text-transform: uppercase; letter-spacing: 0.04em; }
+    pre { background: #0f172a; border: 1px solid var(--border); border-radius: 6px; padding: 0.75em; overflow-x: auto; font-size: 0.8rem; max-height: 18em; }
+    .muted { color: var(--muted); font-size: 0.9rem; }
+    .row { display: flex; gap: 0.5em; align-items: center; flex-wrap: wrap; }
+    .row > input { flex: 1 1 200px; }
+    .status-ok { color: #86efac; }
+    .status-err { color: #fca5a5; }
+  </style>
+</head>
+<body>
+  <h1>PIVX Wallet Kit — Demo</h1>
+  <p class="muted">
+    A ~100-line example of using
+    <a href="https://github.com/PIVX-Labs/pivx-wallet-kit" target="_blank">pivx-wallet-kit</a>
+    in the browser. All wallet operations run client-side via WebAssembly —
+    the only network call is an optional Blockbook UTXO fetch.
+  </p>
+
+  <div class="section">
+    <h2>1. Create or import a wallet</h2>
+    <button id="generate">Generate new mnemonic</button>
+    <div class="label">BIP39 mnemonic (24 words)</div>
+    <textarea id="mnemonic" placeholder="abandon abandon abandon ... about"></textarea>
+    <button id="import" style="margin-top: 0.5em">Derive wallet</button>
+  </div>
+
+  <div class="section" id="wallet-view" style="display:none">
+    <h2>2. Your addresses</h2>
+    <div class="label">Shield address (private, starts with <code>ps1…</code>)</div>
+    <div class="addr" id="shield-addr"></div>
+    <div class="label">Transparent address (public, starts with <code>D…</code>)</div>
+    <div class="addr" id="transparent-addr"></div>
+
+    <h2 style="margin-top: 1.5em">3. Check your transparent balance</h2>
+    <p class="muted">Fetches UTXOs from the PIVX explorer and runs them through the kit's Blockbook parser.</p>
+    <button id="balance">Check balance</button>
+    <div id="balance-result" style="margin-top: 0.5em"></div>
+
+    <h2 style="margin-top: 1.5em">4. Encrypt / decrypt round-trip</h2>
+    <p class="muted">
+      The kit derives a 32-byte key from anything the consumer supplies — here, SHA-256 of a passphrase.
+      After encryption, seed and mnemonic become ciphertext in memory (safe to persist to localStorage,
+      IndexedDB, etc.). Wrong-password decryption leaves state untouched.
+    </p>
+    <div class="row">
+      <input id="passphrase" type="password" placeholder="Passphrase (any string)" />
+      <button id="encrypt">Encrypt</button>
+      <button id="decrypt">Decrypt</button>
+    </div>
+
+    <div class="label">Current in-memory wallet state</div>
+    <pre id="state"></pre>
+  </div>
+
+  <div class="section">
+    <h2>How this works</h2>
+    <pre><code>import init, {
+  generate_mnemonic, validate_mnemonic, import_wallet,
+  derive_shield_address, derive_transparent_address,
+  encrypt_wallet, decrypt_wallet,
+  parse_blockbook_utxos, format_sat_to_piv,
+} from './pkg/pivx_wallet_kit.js';
+
+await init();                          // load the WASM
+const mnemonic = generate_mnemonic();  // fresh 24 words
+const wallet   = import_wallet(mnemonic, 0);
+const shield   = derive_shield_address(wallet.extfvk);
+const transparent = derive_transparent_address(mnemonic);
+
+// Encryption (symmetric; wrong key errors cleanly):
+const encrypted = encrypt_wallet(wallet, key32);
+const restored  = decrypt_wallet(encrypted, key32);</code></pre>
+    <p class="muted">See <a href="https://github.com/PIVX-Labs/pivx-wallet-kit/blob/master/examples/web-wallet/app.js">app.js</a> for the full source.</p>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
