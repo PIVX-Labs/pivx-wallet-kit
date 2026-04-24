@@ -4,9 +4,10 @@
 //! directly after nLockTime. This differs from Kerrigan (v3 type 10) and
 //! Zcash (v4).
 
+pub mod builder;
 pub mod keys;
 pub mod notes;
-pub mod tree;
-pub mod builder;
 pub mod prover;
+pub mod sync;
+pub mod tree;
 pub mod tx;

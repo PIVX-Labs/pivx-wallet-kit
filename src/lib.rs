@@ -21,6 +21,7 @@
 //! | [`transparent`] | Transparent tx building, UTXO management |
 
 pub mod params;
+pub mod simd;
 pub mod checkpoints;
 pub mod keys;
 pub mod fees;
