@@ -36,18 +36,37 @@ pub struct TransparentTransactionResult {
     pub fee: u64,
 }
 
-/// Build and sign a v3 transparent transaction.
+/// Build and sign a shielding transaction: transparent inputs → shield output(s).
 ///
-/// Handles both transparent→transparent and transparent→shield destinations.
-/// Shield destinations require `prover` to be `Some(_)`.
-pub fn create_transparent_transaction(
+/// This is the only path through the v3 builder — pure transparent→transparent
+/// sends take the raw v1 P2PKH path (see [`create_raw_transparent_transaction`])
+/// because PIVX nodes reject v3 txs with no Sapling data.
+///
+/// The caller must supply a loaded Sapling prover — the tx carries a real
+/// Sapling output bundle, so Groth16 proofs are mandatory.
+///
+/// Returns an error if `to_address` is a transparent address; such calls
+/// should go through [`create_raw_transparent_transaction`] instead.
+pub fn create_shielding_transaction(
     wallet: &mut WalletData,
     bip39_seed: &[u8],
     to_address: &str,
     amount: u64,
     block_height: u32,
-    prover: Option<&SaplingProver>,
+    prover: &SaplingProver,
 ) -> Result<TransparentTransactionResult, Box<dyn Error>> {
+    let to = keys::decode_generic_address(to_address)?;
+    let shield_addr = match to {
+        GenericAddress::Shield(a) => a,
+        GenericAddress::Transparent(_) => {
+            return Err(
+                "create_shielding_transaction only supports shield destinations; \
+                 use create_raw_transparent_transaction for transparent destinations"
+                    .into(),
+            );
+        }
+    };
+
     let network = MAIN_NETWORK;
 
     let (own_address, _pubkey_bytes, privkey_bytes) =
@@ -68,11 +87,10 @@ pub fn create_transparent_transaction(
         return Err("No transparent UTXOs available".into());
     }
 
-    let to = keys::decode_generic_address(to_address)?;
-    let is_shield_dest = matches!(to, GenericAddress::Shield(_));
-
-    let transparent_output_count: u64 = if is_shield_dest { 0 } else { 2 };
-    let sapling_output_count: u64 = if is_shield_dest { 2 } else { 0 };
+    // Shield dest: 0 transparent outs, 2 sapling outs (destination + change-back-to-self would
+    // need a shield change address, but currently change goes back as transparent).
+    let transparent_output_count: u64 = 0;
+    let sapling_output_count: u64 = 2;
 
     let mut selected: Vec<SerializedUTXO> = Vec::new();
     let mut total: u64 = 0;
@@ -102,26 +120,20 @@ pub fn create_transparent_transaction(
 
     let change = total - amount - fee;
 
-    let sapling_anchor = if is_shield_dest {
-        if crate::sapling::tree::is_empty_tree_hex(&wallet.commitment_tree) {
-            Some(Anchor::empty_tree())
-        } else {
-            let tree = read_tree_hex(&wallet.commitment_tree)?;
-            Some(
-                Anchor::from_bytes(tree.root().to_bytes())
-                    .into_option()
-                    .unwrap_or(Anchor::empty_tree()),
-            )
-        }
+    let sapling_anchor = if crate::sapling::tree::is_empty_tree_hex(&wallet.commitment_tree) {
+        Anchor::empty_tree()
     } else {
-        None
+        let tree = read_tree_hex(&wallet.commitment_tree)?;
+        Anchor::from_bytes(tree.root().to_bytes())
+            .into_option()
+            .unwrap_or(Anchor::empty_tree())
     };
 
     let mut builder = Builder::new(
         network,
         BlockHeight::from_u32(block_height),
         BuildConfig::Standard {
-            sapling_anchor,
+            sapling_anchor: Some(sapling_anchor),
             orchard_anchor: None,
         },
     );
@@ -147,18 +159,9 @@ pub fn create_transparent_transaction(
     }
 
     let send_amount = Zatoshis::from_u64(amount).map_err(|_| "Invalid amount")?;
-    match to {
-        GenericAddress::Transparent(addr) => {
-            builder
-                .add_transparent_output(&addr, send_amount)
-                .map_err(|e| format!("Failed to add output: {:?}", e))?;
-        }
-        GenericAddress::Shield(addr) => {
-            builder
-                .add_sapling_output::<FeeRule>(None, addr, send_amount, MemoBytes::empty())
-                .map_err(|_| "Failed to add shield output")?;
-        }
-    }
+    builder
+        .add_sapling_output::<FeeRule>(None, shield_addr, send_amount, MemoBytes::empty())
+        .map_err(|_| "Failed to add shield output")?;
 
     if change > 0 {
         let change_amount = Zatoshis::from_u64(change).map_err(|_| "Invalid change")?;
@@ -169,25 +172,14 @@ pub fn create_transparent_transaction(
         }
     }
 
-    let prover_ref = if is_shield_dest {
-        prover.ok_or(
-            "Shield destination requires a Sapling prover (call verify_and_load_params first)",
-        )?
-    } else {
-        // For transparent-only txs, librustpivx's builder requires prover refs that
-        // won't actually be invoked. If the caller supplied a prover, use it;
-        // otherwise this branch returns an error.
-        prover.ok_or("Sapling prover is required by the v3 builder even for transparent-only txs")?
-    };
-
     let fee_rule = FeeRule::non_standard(Zatoshis::from_u64(fee).map_err(|_| "Invalid fee")?);
     let result = builder.build(
         &signing_set,
         &[],
         &[],
         OsRng,
-        &prover_ref.1,
-        &prover_ref.0,
+        &prover.1,
+        &prover.0,
         &fee_rule,
     )?;
 
@@ -204,11 +196,17 @@ pub fn create_transparent_transaction(
     })
 }
 
-/// Build a raw v1 P2PKH transparent transaction, signed with ECDSA / SIGHASH_ALL.
+/// Build a signed transparent transaction — canonical entry for any spend
+/// from transparent UTXOs.
 ///
-/// Bypasses the v3/Sapling format that PIVX nodes reject for pure transparent txs.
-/// For shield destinations, falls through to [`create_transparent_transaction`];
-/// that branch requires `block_height` and a Sapling `prover`.
+/// For transparent destinations (`D...`): produces a raw v1 P2PKH transaction
+/// signed with ECDSA / SIGHASH_ALL. No Sapling machinery is touched —
+/// `block_height_for_shield` and `prover_for_shield` are ignored. Consumers
+/// can pass `0` and `None`.
+///
+/// For shield destinations (`ps1...`): delegates to
+/// [`create_shielding_transaction`]. Both `block_height_for_shield` (the
+/// chain tip) and `prover_for_shield` (a loaded Sapling prover) are required.
 pub fn create_raw_transparent_transaction(
     wallet: &mut WalletData,
     bip39_seed: &[u8],
@@ -218,13 +216,16 @@ pub fn create_raw_transparent_transaction(
     prover_for_shield: Option<&SaplingProver>,
 ) -> Result<TransparentTransactionResult, Box<dyn Error>> {
     if to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
-        return create_transparent_transaction(
+        let prover = prover_for_shield.ok_or(
+            "Shield destination requires a Sapling prover (call verify_and_load_params first)",
+        )?;
+        return create_shielding_transaction(
             wallet,
             bip39_seed,
             to_address,
             amount,
             block_height_for_shield,
-            prover_for_shield,
+            prover,
         );
     }
 

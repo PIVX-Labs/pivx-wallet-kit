@@ -221,6 +221,13 @@ pub fn build_shield_tx(
     .map_err(to_js_err)
 }
 
+/// Build a transparent-source transaction (either transparent- or shield-dest).
+///
+/// Pure transparent→transparent sends do not need the Sapling prover to be
+/// loaded — callers can pass `block_height = 0` and skip `load_sapling_params`.
+///
+/// Shield destinations require `load_sapling_params` to have been called
+/// (and `block_height` to be the current chain tip + 1).
 #[wasm_bindgen]
 pub fn build_transparent_tx(
     wallet_js: JsValue,
@@ -231,39 +238,12 @@ pub fn build_transparent_tx(
 ) -> Result<JsValue, JsError> {
     let mut w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
 
-    let r = crate::transparent::builder::create_transparent_transaction(
-        &mut w,
-        bip39_seed,
-        to_address,
-        amount,
-        block_height,
-        PROVER.get(),
-    )
-    .map_err(to_js_err)?;
-
-    serde_wasm_bindgen::to_value(&BuildTxResult {
-        result: &r,
-        wallet: &w,
-    })
-    .map_err(to_js_err)
-}
-
-#[wasm_bindgen]
-pub fn build_raw_transparent_tx(
-    wallet_js: JsValue,
-    bip39_seed: &[u8],
-    to_address: &str,
-    amount: u64,
-    block_height_for_shield: u32,
-) -> Result<JsValue, JsError> {
-    let mut w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
-
     let r = crate::transparent::builder::create_raw_transparent_transaction(
         &mut w,
         bip39_seed,
         to_address,
         amount,
-        block_height_for_shield,
+        block_height,
         PROVER.get(),
     )
     .map_err(to_js_err)?;

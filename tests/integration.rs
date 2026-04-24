@@ -390,6 +390,88 @@ fn handle_blocks_processes_real_transparent_tx_without_notes() {
 // Shield stream parser
 // ---------------------------------------------------------------------------
 
+/// The kit must let consumers build pure transparent→transparent transactions
+/// without ever loading the Sapling prover. Enforced by this test, which
+/// constructs a wallet with a synthetic transparent UTXO and drives the raw
+/// v1 P2PKH path — if the kit ever accidentally re-requires a prover here,
+/// this test will fail because we pass `None`.
+#[test]
+fn transparent_to_transparent_tx_needs_no_prover() {
+    use pivx_wallet_kit::transparent::builder::create_raw_transparent_transaction;
+    use pivx_wallet_kit::wallet::SerializedUTXO;
+
+    let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
+    let bip39_seed = mnemonic.to_seed("");
+
+    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    w.unspent_utxos.push(SerializedUTXO {
+        // A fake but well-formed 64-char txid.
+        txid: "a".repeat(64),
+        vout: 0,
+        amount: 500_000_000, // 5 PIV
+        script: String::new(),
+        height: 5_000_000,
+    });
+
+    // Destination is the same wallet's transparent address — guaranteed to
+    // be a `D...` address, triggering the raw v1 path.
+    let dest = w.get_transparent_address().unwrap();
+
+    let result = create_raw_transparent_transaction(
+        &mut w,
+        &bip39_seed,
+        &dest,
+        100_000_000, // 1 PIV
+        0,           // block_height_for_shield — unused for transparent dest
+        None,        // prover_for_shield — unused for transparent dest
+    )
+    .expect("pure transparent tx should build without prover");
+
+    assert!(!result.txhex.is_empty());
+    assert_eq!(result.amount, 100_000_000);
+    assert_eq!(result.spent.len(), 1);
+    // Raw v1 tx: version byte 0x01 0x00 0x00 0x00.
+    let tx_bytes = simd::hex::hex_string_to_bytes(&result.txhex);
+    assert_eq!(&tx_bytes[0..4], &[0x01, 0x00, 0x00, 0x00]);
+}
+
+/// Shield destinations must reject `prover_for_shield = None`.
+#[test]
+fn transparent_to_shield_requires_prover() {
+    use pivx_wallet_kit::transparent::builder::create_raw_transparent_transaction;
+    use pivx_wallet_kit::wallet::SerializedUTXO;
+
+    let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
+    let bip39_seed = mnemonic.to_seed("");
+
+    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    w.unspent_utxos.push(SerializedUTXO {
+        txid: "a".repeat(64),
+        vout: 0,
+        amount: 500_000_000,
+        script: String::new(),
+        height: 5_000_000,
+    });
+
+    // Destination is a shield address; prover_for_shield = None must error.
+    let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&mnemonic.to_seed("")[..32]);
+    let extsk = keys::spending_key_from_seed(&seed, params::PIVX_COIN_TYPE, 0).unwrap();
+    let extfvk = keys::full_viewing_key(&extsk);
+    let shield_dest = keys::get_default_address(&keys::encode_extfvk(&extfvk)).unwrap();
+
+    let err = create_raw_transparent_transaction(
+        &mut w,
+        &bip39_seed,
+        &shield_dest,
+        100_000_000,
+        0,
+        None,
+    );
+    assert!(err.is_err(), "shield dest without prover should error");
+}
+
 #[test]
 fn is_empty_tree_hex_accepts_all_known_empty_forms() {
     assert!(sapling::tree::is_empty_tree_hex(""));
