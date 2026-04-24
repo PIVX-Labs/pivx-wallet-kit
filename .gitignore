@@ -1,2 +1,7 @@
 /target
-Cargo.lock
+
+# Cargo.lock is committed even though this is a library crate. `librustpivx`
+# pulls in `core2 ^0.3` as a transitive dep, and every published 0.3.x has
+# been yanked — any fresh resolution fails. Keeping the lockfile pins the
+# yanked version (which is still downloadable), so CI and fresh clones can
+# build without manual `[patch.crates-io]` gymnastics.

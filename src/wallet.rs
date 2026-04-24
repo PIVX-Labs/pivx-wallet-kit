@@ -317,6 +317,30 @@ pub fn encrypt_secrets(data: &mut WalletData, key: &[u8; 32]) -> Result<(), Box<
     Ok(())
 }
 
+/// Encrypt the wallet's secrets with `key` and serialize the result as a
+/// pretty-printed JSON string, ready to be persisted.
+///
+/// Prefer this over calling [`encrypt_secrets`] + `serde_json::to_string_pretty`
+/// by hand — it clones the wallet via [`WalletData::clone_for_encryption`] first,
+/// so encryption never mutates the live in-memory plaintext wallet, and it
+/// never passes an unencrypted `WalletData` through `serde_json`'s internal
+/// buffers.
+pub fn serialize_encrypted(data: &WalletData, key: &[u8; 32]) -> Result<String, Box<dyn Error>> {
+    let mut disk_data = data.clone_for_encryption();
+    encrypt_secrets(&mut disk_data, key)?;
+    Ok(serde_json::to_string_pretty(&disk_data)?)
+}
+
+/// Deserialize an encrypted wallet JSON and decrypt its secrets with `key`.
+///
+/// Returns `Err` without mutating the input if the key is wrong (see
+/// [`decrypt_secrets`] for the validation semantics).
+pub fn deserialize_encrypted(json: &str, key: &[u8; 32]) -> Result<WalletData, Box<dyn Error>> {
+    let mut data: WalletData = serde_json::from_str(json)?;
+    decrypt_secrets(&mut data, key)?;
+    Ok(data)
+}
+
 /// Decrypt `seed` and `mnemonic` in place after deserialization.
 ///
 /// Validates the decryption by re-deriving the extfvk and comparing against

@@ -225,6 +225,30 @@ fn wallet_disk_roundtrip_preserves_decryption() {
     assert_eq!(w2.extfvk, original_extfvk);
 }
 
+/// The kit's serialize_encrypted + deserialize_encrypted must round-trip
+/// a wallet through an encrypted JSON blob, without ever passing a
+/// cleartext WalletData through serde_json (which would leak the seed
+/// to unzeroized buffers).
+#[test]
+fn wallet_serialize_encrypted_roundtrip() {
+    let w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let original_extfvk = w.extfvk.clone();
+    let key = [0x77u8; 32];
+
+    let json = wallet::serialize_encrypted(&w, &key).unwrap();
+    // The JSON must not contain the mnemonic in plaintext.
+    assert!(!json.contains("abandon"));
+
+    let decrypted = wallet::deserialize_encrypted(&json, &key).unwrap();
+    assert_eq!(decrypted.get_mnemonic(), TEST_MNEMONIC);
+    assert_eq!(decrypted.extfvk, original_extfvk);
+
+    // Wrong key produces error, original wallet unaffected.
+    let wrong = [0x88u8; 32];
+    assert!(wallet::deserialize_encrypted(&json, &wrong).is_err());
+    assert_eq!(w.get_mnemonic(), TEST_MNEMONIC); // untouched
+}
+
 #[test]
 fn clone_for_encryption_is_independent() {
     let w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
