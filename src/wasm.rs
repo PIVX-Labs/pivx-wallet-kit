@@ -122,15 +122,14 @@ pub fn parse_shield_stream(bytes: &[u8], max_blocks: Option<usize>) -> Result<Js
     use std::io::Cursor;
     let cap = max_blocks.unwrap_or(DEFAULT_MAX_SHIELD_BLOCKS);
     let mut cursor = Cursor::new(bytes);
-    let mut all_blocks: Vec<crate::sapling::sync::ShieldBlock> = Vec::new();
-    while all_blocks.len() < cap {
-        let remaining = cap - all_blocks.len();
-        match crate::sync::parse_next_blocks(&mut cursor, remaining.min(64)).map_err(to_js_err)? {
-            Some(batch) => all_blocks.extend(batch),
-            None => break,
-        }
-    }
-    serde_wasm_bindgen::to_value(&all_blocks).map_err(to_js_err)
+    // Single parse to completion — sub-batching would mis-attribute txs to
+    // the wrong block at each inner boundary (the parser counts headers on
+    // exit but the following txs are only consumed on the next call, so
+    // they get stashed and re-tagged with the NEXT header's height).
+    let blocks = crate::sync::parse_next_blocks(&mut cursor, cap)
+        .map_err(to_js_err)?
+        .unwrap_or_default();
+    serde_wasm_bindgen::to_value(&blocks).map_err(to_js_err)
 }
 
 #[wasm_bindgen]
@@ -303,4 +302,39 @@ pub fn parse_blockbook_utxos(raw: JsValue) -> Result<JsValue, JsError> {
         serde_wasm_bindgen::from_value(raw).map_err(to_js_err)?;
     let utxos = crate::wallet::parse_blockbook_utxos(&raw);
     serde_wasm_bindgen::to_value(&utxos).map_err(to_js_err)
+}
+
+/// Sum the spendable shield balance from a `WalletData`, in satoshis.
+///
+/// Uses the kit's own `WalletData::get_balance` so browser consumers don't
+/// have to know the internal JSON shape of a Sapling `Note`.
+#[wasm_bindgen]
+pub fn wallet_shield_balance_sat(wallet_js: JsValue) -> Result<u64, JsError> {
+    let w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
+    Ok(w.get_balance())
+}
+
+/// Sum the transparent balance from a `WalletData`, in satoshis.
+#[wasm_bindgen]
+pub fn wallet_transparent_balance_sat(wallet_js: JsValue) -> Result<u64, JsError> {
+    let w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
+    Ok(w.get_transparent_balance())
+}
+
+/// Diagnostic: returns the Sapling commitment tree's current size (= the
+/// position the next appended leaf would occupy).
+///
+/// A correctly-deserialized tree from a non-empty checkpoint should report
+/// a non-zero size matching the chain's leaf count at that checkpoint.
+#[wasm_bindgen]
+pub fn tree_position(tree_hex: &str) -> Result<u64, JsError> {
+    use incrementalmerkletree::frontier::CommitmentTree;
+    use pivx_primitives::merkle_tree::read_commitment_tree;
+    use sapling::Node;
+    use std::io::Cursor;
+
+    let bytes = crate::simd::hex::hex_string_to_bytes(tree_hex);
+    let tree: CommitmentTree<Node, 32> =
+        read_commitment_tree(Cursor::new(bytes)).map_err(to_js_err)?;
+    Ok(tree.size() as u64)
 }

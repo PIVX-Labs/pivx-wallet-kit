@@ -98,7 +98,18 @@
     <button id="balance">Check balance</button>
     <div id="balance-result" style="margin-top: 0.5em"></div>
 
-    <h2 style="margin-top: 1.5em">4. Encrypt / decrypt round-trip</h2>
+    <h2 style="margin-top: 1.5em">4. Check your shield balance</h2>
+    <p class="muted">
+      Streams compact Sapling blocks from a PIVX bridge, decrypts your notes
+      with the viewing key in WASM, and sums the spendable balance. Starts at
+      the wallet's embedded checkpoint — a fresh wallet is already near the
+      chain tip because <code>import_wallet</code> was called with the current
+      block height, so sync completes in seconds.
+    </p>
+    <button id="shield-balance">Check shield balance</button>
+    <div id="shield-result" style="margin-top: 0.5em"></div>
+
+    <h2 style="margin-top: 1.5em">5. Encrypt / decrypt round-trip</h2>
     <p class="muted">
       The kit derives a 32-byte key from anything the consumer supplies — here, SHA-256 of a passphrase.
       After encryption, seed and mnemonic become ciphertext in memory (safe to persist to localStorage,
