@@ -1,4 +1,5 @@
 /target
+/pkg
 
 # Cargo.lock is committed even though this is a library crate. `librustpivx`
 # pulls in `core2 ^0.3` as a transitive dep, and every published 0.3.x has
