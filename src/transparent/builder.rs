@@ -82,7 +82,7 @@ pub fn create_shielding_transaction(
     };
 
     let mut utxos = wallet.unspent_utxos.clone();
-    utxos.sort_by(|a, b| b.amount.cmp(&a.amount));
+    utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
     if utxos.is_empty() {
         return Err("No transparent UTXOs available".into());
     }
@@ -236,7 +236,7 @@ pub fn create_raw_transparent_transaction(
     let own_script = keys::address_to_p2pkh_script(&own_address)?;
 
     let mut utxos = wallet.unspent_utxos.clone();
-    utxos.sort_by(|a, b| b.amount.cmp(&a.amount));
+    utxos.sort_by_key(|u| std::cmp::Reverse(u.amount));
     if utxos.is_empty() {
         return Err("No transparent UTXOs available".into());
     }

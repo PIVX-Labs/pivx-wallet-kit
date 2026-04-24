@@ -494,6 +494,7 @@ pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
 /// Convert hex string to bytes (arbitrary length).
 ///
 /// Uses SIMD for the bulk of the conversion when input is large enough.
+#[allow(clippy::uninit_vec)] // SIMD paths write every byte before the buffer is read
 pub fn hex_string_to_bytes(s: &str) -> Vec<u8> {
     let h = s.as_bytes();
     let out_len = h.len() / 2;

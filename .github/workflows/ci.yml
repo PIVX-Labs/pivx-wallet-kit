@@ -63,14 +63,14 @@ jobs:
 
       - name: Build WASM (default features)
         run: cargo build --release --target wasm32-unknown-unknown
-
-      - name: Build WASM (multicore feature)
-        run: cargo build --release --target wasm32-unknown-unknown --features multicore
+        # The `multicore` feature is intentionally NOT built here: it requires
+        # a nightly toolchain with `-Z build-std` and the `atomics` / `bulk-memory`
+        # WASM target features. Consumers who need threaded WASM set this up
+        # in their own build environment.
 
   clippy:
-    name: Clippy (advisory)
+    name: Clippy
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -85,4 +85,4 @@ jobs:
             target
           key: ubuntu-latest-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ubuntu-latest-cargo-clippy-
-      - run: cargo clippy --release --no-deps
+      - run: cargo clippy --release --no-deps -- -D warnings

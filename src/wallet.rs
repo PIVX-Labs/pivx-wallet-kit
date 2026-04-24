@@ -289,7 +289,7 @@ pub fn crypt(data: &[u8], key: &[u8; 32]) -> Vec<u8> {
     while offset < data.len() {
         let mut hasher = Sha256::new();
         hasher.update(key);
-        hasher.update(&counter.to_le_bytes());
+        hasher.update(counter.to_le_bytes());
         let block: [u8; 32] = hasher.finalize().into();
 
         let chunk_len = (data.len() - offset).min(32);

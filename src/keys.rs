@@ -95,6 +95,7 @@ pub fn encode_payment_address(addr: &PaymentAddress) -> String {
 /// Derive a transparent PIVX address from a BIP39 seed (64 bytes).
 /// Path: `m/44'/PIVX_COIN_TYPE'/0'/change/index`.
 /// Returns `(base58 address, compressed pubkey [33], private key [32])`.
+#[allow(clippy::type_complexity)] // Tuple return is a documented stable shape; refactor tracked as an ergonomics concern
 pub fn transparent_key_from_bip39_seed(
     bip39_seed: &[u8],
     change: u32,

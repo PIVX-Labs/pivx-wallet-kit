@@ -171,6 +171,7 @@ pub fn handle_blocks(
 
 /// Process a single full-format transaction.
 #[inline]
+#[allow(clippy::ptr_arg)] // Witness vecs grow inside; slice would not allow `push`.
 fn handle_transaction(
     tree: &mut CommitmentTree<Node, DEPTH>,
     tx_bytes: &[u8],
@@ -247,6 +248,7 @@ fn handle_transaction(
 ///   per output: cv(32) + cmu(32) + epk(32) + enc_ciphertext(580) + out_ciphertext(80)
 /// ```
 #[inline]
+#[allow(clippy::ptr_arg)] // Witness vecs grow inside; slice would not allow `push`.
 fn handle_compact_transaction(
     tree: &mut CommitmentTree<Node, DEPTH>,
     payload: &[u8],
