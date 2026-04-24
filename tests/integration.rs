@@ -186,6 +186,58 @@ fn wallet_decrypt_wrong_key_fails() {
     assert!(err.is_err(), "decrypt with wrong key should fail");
 }
 
+/// Wrong-key decrypt must leave the wallet's encrypted state intact so the
+/// caller can retry with a different key without reloading from disk.
+#[test]
+fn wallet_decrypt_wrong_key_does_not_corrupt_state() {
+    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let key = [0xA5u8; 32];
+    wallet::encrypt_secrets(&mut w, &key).unwrap();
+
+    // Snapshot the encrypted state.
+    let encrypted_mnemonic = w.get_mnemonic().to_string();
+
+    let wrong_key = [0x99u8; 32];
+    let _ = wallet::decrypt_secrets(&mut w, &wrong_key);
+
+    // State should be untouched — mnemonic still the encrypted hex string.
+    assert_eq!(w.get_mnemonic(), encrypted_mnemonic);
+
+    // Retry with the right key should now succeed cleanly.
+    wallet::decrypt_secrets(&mut w, &key).unwrap();
+    assert_eq!(w.get_mnemonic(), TEST_MNEMONIC);
+}
+
+/// Full disk round-trip: encrypt → serialize to JSON → deserialize → decrypt.
+/// Catches regressions like a JSON roundtrip dropping the 32-byte seed.
+#[test]
+fn wallet_disk_roundtrip_preserves_decryption() {
+    let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let original_extfvk = w.extfvk.clone();
+    let key = [0x12u8; 32];
+
+    wallet::encrypt_secrets(&mut w, &key).unwrap();
+    let json = serde_json::to_string(&w).unwrap();
+
+    let mut w2: wallet::WalletData = serde_json::from_str(&json).unwrap();
+    wallet::decrypt_secrets(&mut w2, &key).unwrap();
+    assert_eq!(w2.get_mnemonic(), TEST_MNEMONIC);
+    assert_eq!(w2.extfvk, original_extfvk);
+}
+
+#[test]
+fn clone_for_encryption_is_independent() {
+    let w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
+    let mut clone = w.clone_for_encryption();
+    let key = [0x33u8; 32];
+    wallet::encrypt_secrets(&mut clone, &key).unwrap();
+
+    // The original should still be plaintext.
+    assert_eq!(w.get_mnemonic(), TEST_MNEMONIC);
+    // The clone should not match the plaintext anymore.
+    assert_ne!(clone.get_mnemonic(), TEST_MNEMONIC);
+}
+
 #[test]
 fn wallet_reset_to_checkpoint_clears_state() {
     let mut w = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
@@ -337,6 +389,16 @@ fn handle_blocks_processes_real_transparent_tx_without_notes() {
 // ---------------------------------------------------------------------------
 // Shield stream parser
 // ---------------------------------------------------------------------------
+
+#[test]
+fn is_empty_tree_hex_accepts_all_known_empty_forms() {
+    assert!(sapling::tree::is_empty_tree_hex(""));
+    assert!(sapling::tree::is_empty_tree_hex("00"));
+    assert!(sapling::tree::is_empty_tree_hex("000000"));
+    // A populated frontier-hex is not empty.
+    let (_, populated) = checkpoints::get_checkpoint(5_000_000);
+    assert!(!sapling::tree::is_empty_tree_hex(populated));
+}
 
 #[test]
 fn parse_shield_stream_synthetic_compact() {

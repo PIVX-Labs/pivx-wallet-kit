@@ -7,12 +7,15 @@
 
 use crate::sapling::prover::SaplingProver;
 use crate::wallet::WalletData;
-use std::cell::RefCell;
+use std::sync::OnceLock;
 use wasm_bindgen::prelude::*;
 
-thread_local! {
-    static PROVER: RefCell<Option<SaplingProver>> = const { RefCell::new(None) };
-}
+/// Process-global prover cache.
+///
+/// Uses `OnceLock` rather than `thread_local!` so the prover survives across
+/// rayon Web Workers under the `multicore` feature — each worker has its own
+/// TLS, so a TLS-scoped cache would be invisible on non-main threads.
+static PROVER: OnceLock<SaplingProver> = OnceLock::new();
 
 #[cfg(feature = "multicore")]
 pub use wasm_bindgen_rayon::init_thread_pool;
@@ -110,15 +113,22 @@ pub fn get_checkpoint(block_height: i32) -> Result<JsValue, JsError> {
 // Shield sync
 // ---------------------------------------------------------------------------
 
+/// Default per-call cap on blocks parsed from a shield stream (prevents a
+/// malicious RPC from triggering multi-GB allocations in the browser).
+pub const DEFAULT_MAX_SHIELD_BLOCKS: usize = 10_000;
+
 #[wasm_bindgen]
-pub fn parse_shield_stream(bytes: &[u8]) -> Result<JsValue, JsError> {
+pub fn parse_shield_stream(bytes: &[u8], max_blocks: Option<usize>) -> Result<JsValue, JsError> {
     use std::io::Cursor;
+    let cap = max_blocks.unwrap_or(DEFAULT_MAX_SHIELD_BLOCKS);
     let mut cursor = Cursor::new(bytes);
-    let mut all_blocks = Vec::new();
-    while let Some(batch) =
-        crate::sync::parse_next_blocks(&mut cursor, usize::MAX).map_err(to_js_err)?
-    {
-        all_blocks.extend(batch);
+    let mut all_blocks: Vec<crate::sapling::sync::ShieldBlock> = Vec::new();
+    while all_blocks.len() < cap {
+        let remaining = cap - all_blocks.len();
+        match crate::sync::parse_next_blocks(&mut cursor, remaining.min(64)).map_err(to_js_err)? {
+            Some(batch) => all_blocks.extend(batch),
+            None => break,
+        }
     }
     serde_wasm_bindgen::to_value(&all_blocks).map_err(to_js_err)
 }
@@ -155,20 +165,31 @@ pub fn get_sapling_root(tree_hex: &str) -> Result<String, JsError> {
 /// cache. Subsequent `build_shield_tx` calls reuse the loaded prover.
 #[wasm_bindgen]
 pub fn load_sapling_params(output_bytes: &[u8], spend_bytes: &[u8]) -> Result<(), JsError> {
+    if PROVER.get().is_some() {
+        return Ok(());
+    }
     let prover = crate::sapling::prover::verify_and_load_params(output_bytes, spend_bytes)
         .map_err(to_js_err)?;
-    PROVER.with(|p| *p.borrow_mut() = Some(prover));
+    let _ = PROVER.set(prover);
     Ok(())
 }
 
 #[wasm_bindgen]
 pub fn has_sapling_params() -> bool {
-    PROVER.with(|p| p.borrow().is_some())
+    PROVER.get().is_some()
 }
 
 // ---------------------------------------------------------------------------
 // Transaction builders
 // ---------------------------------------------------------------------------
+
+/// Output shape of build_*_tx bindings: `{ result, wallet }` — a JS object with
+/// two named fields, not a tuple.
+#[derive(serde::Serialize)]
+struct BuildTxResult<'a, T: serde::Serialize> {
+    result: &'a T,
+    wallet: &'a WalletData,
+}
 
 #[wasm_bindgen]
 pub fn build_shield_tx(
@@ -180,26 +201,24 @@ pub fn build_shield_tx(
 ) -> Result<JsValue, JsError> {
     let mut w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
 
-    let result_out = PROVER.with(|cell| -> Result<_, JsError> {
-        let prover = cell
-            .borrow();
-        let prover = prover
-            .as_ref()
-            .ok_or_else(|| JsError::new("Sapling prover not loaded — call load_sapling_params first"))?;
-        let r = crate::sapling::builder::create_shield_transaction(
-            &mut w,
-            to_address,
-            amount,
-            memo,
-            block_height,
-            prover,
-        )
-        .map_err(to_js_err)?;
-        Ok(r)
-    })?;
+    let prover = PROVER
+        .get()
+        .ok_or_else(|| JsError::new("Sapling prover not loaded — call load_sapling_params first"))?;
+    let r = crate::sapling::builder::create_shield_transaction(
+        &mut w,
+        to_address,
+        amount,
+        memo,
+        block_height,
+        prover,
+    )
+    .map_err(to_js_err)?;
 
-    let encoded = serde_wasm_bindgen::to_value(&(&result_out, &w)).map_err(to_js_err)?;
-    Ok(encoded)
+    serde_wasm_bindgen::to_value(&BuildTxResult {
+        result: &r,
+        wallet: &w,
+    })
+    .map_err(to_js_err)
 }
 
 #[wasm_bindgen]
@@ -212,21 +231,21 @@ pub fn build_transparent_tx(
 ) -> Result<JsValue, JsError> {
     let mut w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
 
-    let result_out = PROVER.with(|cell| -> Result<_, JsError> {
-        let prover = cell.borrow();
-        let r = crate::transparent::builder::create_transparent_transaction(
-            &mut w,
-            bip39_seed,
-            to_address,
-            amount,
-            block_height,
-            prover.as_ref(),
-        )
-        .map_err(to_js_err)?;
-        Ok(r)
-    })?;
+    let r = crate::transparent::builder::create_transparent_transaction(
+        &mut w,
+        bip39_seed,
+        to_address,
+        amount,
+        block_height,
+        PROVER.get(),
+    )
+    .map_err(to_js_err)?;
 
-    serde_wasm_bindgen::to_value(&(&result_out, &w)).map_err(to_js_err)
+    serde_wasm_bindgen::to_value(&BuildTxResult {
+        result: &r,
+        wallet: &w,
+    })
+    .map_err(to_js_err)
 }
 
 #[wasm_bindgen]
@@ -239,21 +258,21 @@ pub fn build_raw_transparent_tx(
 ) -> Result<JsValue, JsError> {
     let mut w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
 
-    let result_out = PROVER.with(|cell| -> Result<_, JsError> {
-        let prover = cell.borrow();
-        let r = crate::transparent::builder::create_raw_transparent_transaction(
-            &mut w,
-            bip39_seed,
-            to_address,
-            amount,
-            block_height_for_shield,
-            prover.as_ref(),
-        )
-        .map_err(to_js_err)?;
-        Ok(r)
-    })?;
+    let r = crate::transparent::builder::create_raw_transparent_transaction(
+        &mut w,
+        bip39_seed,
+        to_address,
+        amount,
+        block_height_for_shield,
+        PROVER.get(),
+    )
+    .map_err(to_js_err)?;
 
-    serde_wasm_bindgen::to_value(&(&result_out, &w)).map_err(to_js_err)
+    serde_wasm_bindgen::to_value(&BuildTxResult {
+        result: &r,
+        wallet: &w,
+    })
+    .map_err(to_js_err)
 }
 
 // ---------------------------------------------------------------------------

@@ -131,6 +131,26 @@ impl WalletData {
             !spent.iter().any(|(txid, vout)| u.txid == *txid && u.vout == *vout)
         });
     }
+
+    /// Deep-copy the wallet for on-disk encryption.
+    ///
+    /// The result can be safely mutated by [`encrypt_secrets`] without
+    /// touching the original in-memory plaintext wallet. Field-by-field
+    /// copy avoids an unzeroized JSON round-trip that would otherwise
+    /// leak the seed bytes through `serde_json`'s internal buffers.
+    pub fn clone_for_encryption(&self) -> Self {
+        WalletData {
+            version: self.version,
+            seed: self.seed,
+            extfvk: self.extfvk.clone(),
+            birthday_height: self.birthday_height,
+            last_block: self.last_block,
+            commitment_tree: self.commitment_tree.clone(),
+            unspent_notes: self.unspent_notes.clone(),
+            mnemonic: self.mnemonic.clone(),
+            unspent_utxos: self.unspent_utxos.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -263,24 +283,46 @@ pub fn encrypt_secrets(data: &mut WalletData, key: &[u8; 32]) -> Result<(), Box<
 
 /// Decrypt `seed` and `mnemonic` in place after deserialization.
 ///
-/// Validates decryption by re-deriving the extfvk and comparing against the
-/// stored value — a wrong key surfaces as an error rather than silently
+/// Validates the decryption by re-deriving the extfvk and comparing against
+/// the stored value — a wrong key surfaces as an error rather than silently
 /// producing garbage.
+///
+/// On any error the wallet's on-disk ciphertext is left untouched; only
+/// after the extfvk check passes do the plaintext fields get committed.
+/// This means a caller can retry with a different key without first
+/// reloading the file from disk.
 pub fn decrypt_secrets(data: &mut WalletData, key: &[u8; 32]) -> Result<(), Box<dyn Error>> {
-    let decrypted_seed = crypt(&data.seed, key);
-    data.seed.copy_from_slice(&decrypted_seed);
+    // Decrypt into scratch buffers first.
+    let mut candidate_seed = [0u8; 32];
+    candidate_seed.copy_from_slice(&crypt(&data.seed, key));
 
     let encrypted_bytes = crate::simd::hex::hex_string_to_bytes(&data.mnemonic);
-    let decrypted_bytes = crypt(&encrypted_bytes, key);
-    data.mnemonic = String::from_utf8(decrypted_bytes)
-        .map_err(|_| "Failed to decrypt wallet — wrong key?")?;
+    let decrypted_mnemonic_bytes = crypt(&encrypted_bytes, key);
+    let candidate_mnemonic = match String::from_utf8(decrypted_mnemonic_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            candidate_seed.zeroize();
+            return Err("Failed to decrypt wallet — wrong key?".into());
+        }
+    };
 
-    let extsk = keys::spending_key_from_seed(&data.seed, PIVX_COIN_TYPE, 0)?;
-    let extfvk = keys::full_viewing_key(&extsk);
-    let derived_extfvk = keys::encode_extfvk(&extfvk);
+    // Validate before mutating `data`.
+    let extsk = match keys::spending_key_from_seed(&candidate_seed, PIVX_COIN_TYPE, 0) {
+        Ok(k) => k,
+        Err(e) => {
+            candidate_seed.zeroize();
+            return Err(e);
+        }
+    };
+    let derived_extfvk = keys::encode_extfvk(&keys::full_viewing_key(&extsk));
     if derived_extfvk != data.extfvk {
+        candidate_seed.zeroize();
         return Err("Failed to decrypt wallet — wrong key or corrupted data.".into());
     }
 
+    // Commit.
+    data.seed.copy_from_slice(&candidate_seed);
+    data.mnemonic = candidate_mnemonic;
+    candidate_seed.zeroize();
     Ok(())
 }

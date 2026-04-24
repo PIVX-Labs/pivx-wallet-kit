@@ -6,7 +6,6 @@ use crate::sapling::prover::SaplingProver;
 use crate::sapling::sync::DEPTH;
 use crate::wallet::WalletData;
 use incrementalmerkletree::frontier::CommitmentTree;
-use incrementalmerkletree::witness::IncrementalWitness;
 use pivx_primitives::consensus::{BlockHeight, Network, NetworkConstants};
 use pivx_primitives::memo::MemoBytes;
 use pivx_primitives::merkle_tree::read_incremental_witness;
@@ -196,11 +195,4 @@ pub use crate::sapling::sync::DEPTH as COMMITMENT_TREE_DEPTH;
 pub fn read_tree_hex(tree_hex: &str) -> Result<CommitmentTree<Node, { DEPTH }>, Box<dyn Error>> {
     let bytes = crate::simd::hex::hex_string_to_bytes(tree_hex);
     Ok(pivx_primitives::merkle_tree::read_commitment_tree(Cursor::new(bytes))?)
-}
-
-/// Placeholder to keep `IncrementalWitness` in scope for downstream consumers.
-#[doc(hidden)]
-#[allow(dead_code)]
-fn _use_incremental_witness() {
-    let _: Option<IncrementalWitness<Node, { DEPTH }>> = None;
 }

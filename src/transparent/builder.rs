@@ -103,15 +103,15 @@ pub fn create_transparent_transaction(
     let change = total - amount - fee;
 
     let sapling_anchor = if is_shield_dest {
-        if !wallet.commitment_tree.is_empty() && wallet.commitment_tree != "00" {
+        if crate::sapling::tree::is_empty_tree_hex(&wallet.commitment_tree) {
+            Some(Anchor::empty_tree())
+        } else {
             let tree = read_tree_hex(&wallet.commitment_tree)?;
             Some(
                 Anchor::from_bytes(tree.root().to_bytes())
                     .into_option()
                     .unwrap_or(Anchor::empty_tree()),
             )
-        } else {
-            Some(Anchor::empty_tree())
         }
     } else {
         None

@@ -27,3 +27,15 @@ pub fn roots_match(local_tree_hex: &str, network_root: &str) -> Result<bool, Box
     let our_root = get_sapling_root(local_tree_hex)?;
     Ok(our_root == network_root)
 }
+
+/// Returns `true` for any hex representation of an empty Sapling commitment
+/// tree.
+///
+/// Different code paths produce different empty-tree encodings (`""`, `"00"`,
+/// or the frontier-with-no-nodes form `"000000"` used by the genesis
+/// checkpoint). Consumers that need to bypass `read_commitment_tree` for an
+/// empty tree should use this helper rather than doing ad-hoc string checks.
+#[inline]
+pub fn is_empty_tree_hex(s: &str) -> bool {
+    s.is_empty() || s == "00" || s == "000000"
+}

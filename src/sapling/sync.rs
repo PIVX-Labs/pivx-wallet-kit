@@ -115,7 +115,11 @@ pub fn handle_blocks(
 
     for block in blocks {
         for tx_bytes in &block.txs {
-            let tx_nullifiers = if tx_bytes[0] == 0x04 {
+            let tag = tx_bytes
+                .first()
+                .copied()
+                .ok_or("empty tx bytes in shield block")?;
+            let tx_nullifiers = if tag == 0x04 {
                 handle_compact_transaction(
                     &mut tree,
                     tx_bytes,
@@ -181,8 +185,12 @@ fn handle_transaction(
         pivx_primitives::consensus::BranchId::Sapling,
     )?;
 
-    let decrypted_tx =
-        decrypt_transaction(&MAIN_NETWORK, BlockHeight::from_u32(320), &tx, key_map);
+    let decrypted_tx = decrypt_transaction(
+        &MAIN_NETWORK,
+        BlockHeight::from_u32(block_height),
+        &tx,
+        key_map,
+    );
 
     let mut nullifiers: Vec<Nullifier> = vec![];
 
@@ -297,6 +305,12 @@ fn handle_compact_transaction(
                 .map_err(|_| "failed to advance witness")?;
         }
 
+        // ZIP-212 enforcement: PIVX mainnet has not yet activated a
+        // ZIP-212-equivalent note-encryption upgrade, so `Off` is correct for
+        // all current heights. If/when PIVX defines an activation height,
+        // select the enforcement from the network consensus parameters here
+        // (the full-tx path in `handle_transaction` already gets this right
+        // via `decrypt_transaction`'s use of `MAIN_NETWORK`).
         let domain = sapling::note_encryption::SaplingDomain::new(
             sapling::note_encryption::Zip212Enforcement::Off,
         );
