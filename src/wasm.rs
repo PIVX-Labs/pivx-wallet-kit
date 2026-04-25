@@ -28,10 +28,32 @@ fn to_js_err<E: std::fmt::Display>(e: E) -> JsError {
 // Mnemonic
 // ---------------------------------------------------------------------------
 
+/// Generate a fresh BIP39 mnemonic. `words` selects the length: one of
+/// 12, 15, 18, 21, or 24. Defaults to 12 (the PIVX Labs convention)
+/// when omitted or zero. Other lengths use proportionally more entropy
+/// (12 = 128 bits, 15 = 160, 18 = 192, 21 = 224, 24 = 256).
 #[wasm_bindgen]
-pub fn generate_mnemonic() -> Result<String, JsError> {
+pub fn generate_mnemonic(words: Option<u32>) -> Result<String, JsError> {
     use rand_core::RngCore;
-    let mut entropy = [0u8; 32];
+    let n = match words.unwrap_or(0) {
+        0 | 12 => 12,
+        15 => 15,
+        18 => 18,
+        21 => 21,
+        24 => 24,
+        other => return Err(JsError::new(&format!(
+            "words must be one of 12, 15, 18, 21, 24; got {}", other
+        ))),
+    };
+    let entropy_bytes = match n {
+        12 => 16,
+        15 => 20,
+        18 => 24,
+        21 => 28,
+        24 => 32,
+        _ => unreachable!(),
+    };
+    let mut entropy = vec![0u8; entropy_bytes];
     rand_core::OsRng.fill_bytes(&mut entropy);
     let m = bip39::Mnemonic::from_entropy(&entropy).map_err(to_js_err)?;
     Ok(m.to_string())
@@ -40,6 +62,16 @@ pub fn generate_mnemonic() -> Result<String, JsError> {
 #[wasm_bindgen]
 pub fn validate_mnemonic(mnemonic: &str) -> bool {
     bip39::Mnemonic::parse_normalized(mnemonic).is_ok()
+}
+
+/// Derive the 64-byte BIP39 seed from a mnemonic phrase. The kit's
+/// transparent transaction builder needs this seed (separately from the
+/// `WalletData` blob) to derive privkeys for signing inputs. Empty
+/// passphrase only — the kit doesn't currently support BIP39 passphrases.
+#[wasm_bindgen]
+pub fn bip39_seed_from_mnemonic(mnemonic: &str) -> Result<Vec<u8>, JsError> {
+    let m = bip39::Mnemonic::parse_normalized(mnemonic).map_err(to_js_err)?;
+    Ok(m.to_seed("").to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +303,16 @@ pub fn estimate_fee(
         sapling_input_count,
         sapling_output_count,
     )
+}
+
+/// Fee estimate for the raw P2PKH transparent path used by
+/// `build_transparent_tx` for transparent→transparent sends. Matches the
+/// formula the kit's builder uses internally — call with `output_count=2`
+/// to match the builder's worst-case (destination + change) sizing, even
+/// when you intend to drain to a single output.
+#[wasm_bindgen]
+pub fn estimate_raw_transparent_fee(input_count: u64, output_count: u64) -> u64 {
+    crate::fees::estimate_raw_transparent_fee(input_count as usize, output_count as usize)
 }
 
 // ---------------------------------------------------------------------------

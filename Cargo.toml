@@ -9,6 +9,10 @@ license = "MIT"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[example]]
+name = "sign"
+path = "examples/sign.rs"
+
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
 
