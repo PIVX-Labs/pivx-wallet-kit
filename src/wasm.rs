@@ -79,42 +79,37 @@ pub fn bip39_seed_from_mnemonic(mnemonic: &str) -> Result<Vec<u8>, JsError> {
 // ---------------------------------------------------------------------------
 
 #[wasm_bindgen]
-pub fn create_wallet(current_height: u32) -> Result<JsValue, JsError> {
-    let w = crate::wallet::create_new_wallet(current_height).map_err(to_js_err)?;
-    serde_wasm_bindgen::to_value(&w).map_err(to_js_err)
+pub fn create_wallet(current_height: u32) -> Result<WalletData, JsError> {
+    crate::wallet::create_new_wallet(current_height).map_err(to_js_err)
 }
 
 #[wasm_bindgen]
-pub fn import_wallet(mnemonic: &str, current_height: u32) -> Result<JsValue, JsError> {
-    let w = crate::wallet::import_wallet(mnemonic, current_height).map_err(to_js_err)?;
-    serde_wasm_bindgen::to_value(&w).map_err(to_js_err)
+pub fn import_wallet(mnemonic: &str, current_height: u32) -> Result<WalletData, JsError> {
+    crate::wallet::import_wallet(mnemonic, current_height).map_err(to_js_err)
 }
 
 #[wasm_bindgen]
-pub fn reset_to_checkpoint(wallet_js: JsValue) -> Result<JsValue, JsError> {
-    let mut w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
-    crate::wallet::reset_to_checkpoint(&mut w).map_err(to_js_err)?;
-    serde_wasm_bindgen::to_value(&w).map_err(to_js_err)
+pub fn reset_to_checkpoint(mut wallet: WalletData) -> Result<WalletData, JsError> {
+    crate::wallet::reset_to_checkpoint(&mut wallet).map_err(to_js_err)?;
+    Ok(wallet)
 }
 
 #[wasm_bindgen]
-pub fn encrypt_wallet(wallet_js: JsValue, key: &[u8]) -> Result<JsValue, JsError> {
-    let mut w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
+pub fn encrypt_wallet(mut wallet: WalletData, key: &[u8]) -> Result<WalletData, JsError> {
     let key: [u8; 32] = key
         .try_into()
         .map_err(|_| JsError::new("key must be exactly 32 bytes"))?;
-    crate::wallet::encrypt_secrets(&mut w, &key).map_err(to_js_err)?;
-    serde_wasm_bindgen::to_value(&w).map_err(to_js_err)
+    crate::wallet::encrypt_secrets(&mut wallet, &key).map_err(to_js_err)?;
+    Ok(wallet)
 }
 
 #[wasm_bindgen]
-pub fn decrypt_wallet(wallet_js: JsValue, key: &[u8]) -> Result<JsValue, JsError> {
-    let mut w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
+pub fn decrypt_wallet(mut wallet: WalletData, key: &[u8]) -> Result<WalletData, JsError> {
     let key: [u8; 32] = key
         .try_into()
         .map_err(|_| JsError::new("key must be exactly 32 bytes"))?;
-    crate::wallet::decrypt_secrets(&mut w, &key).map_err(to_js_err)?;
-    serde_wasm_bindgen::to_value(&w).map_err(to_js_err)
+    crate::wallet::decrypt_secrets(&mut wallet, &key).map_err(to_js_err)?;
+    Ok(wallet)
 }
 
 // ---------------------------------------------------------------------------
@@ -135,10 +130,24 @@ pub fn derive_shield_address(extfvk: &str) -> Result<String, JsError> {
 // Checkpoints
 // ---------------------------------------------------------------------------
 
+/// `(height, commitment_tree_hex)` of the nearest checkpoint at or
+/// below `block_height` — same as the underlying [`crate::checkpoints`]
+/// function, just exposed as a named-field struct so generated TS
+/// callers don't get back an opaque `any`.
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct Checkpoint {
+    pub height: i32,
+    pub commitment_tree_hex: String,
+}
+
 #[wasm_bindgen]
-pub fn get_checkpoint(block_height: i32) -> Result<JsValue, JsError> {
-    let (h, tree) = crate::checkpoints::get_checkpoint(block_height);
-    serde_wasm_bindgen::to_value(&(h, tree)).map_err(to_js_err)
+pub fn get_checkpoint(block_height: i32) -> Checkpoint {
+    let (height, tree) = crate::checkpoints::get_checkpoint(block_height);
+    Checkpoint {
+        height,
+        commitment_tree_hex: tree.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +159,10 @@ pub fn get_checkpoint(block_height: i32) -> Result<JsValue, JsError> {
 pub const DEFAULT_MAX_SHIELD_BLOCKS: usize = 10_000;
 
 #[wasm_bindgen]
-pub fn parse_shield_stream(bytes: &[u8], max_blocks: Option<usize>) -> Result<JsValue, JsError> {
+pub fn parse_shield_stream(
+    bytes: &[u8],
+    max_blocks: Option<usize>,
+) -> Result<ShieldBlocksOut, JsError> {
     use std::io::Cursor;
     let cap = max_blocks.unwrap_or(DEFAULT_MAX_SHIELD_BLOCKS);
     let mut cursor = Cursor::new(bytes);
@@ -161,24 +173,42 @@ pub fn parse_shield_stream(bytes: &[u8], max_blocks: Option<usize>) -> Result<Js
     let blocks = crate::sync::parse_next_blocks(&mut cursor, cap)
         .map_err(to_js_err)?
         .unwrap_or_default();
-    serde_wasm_bindgen::to_value(&blocks).map_err(to_js_err)
+    Ok(ShieldBlocksOut { blocks })
+}
+
+/// Output container for [`parse_shield_stream`]. The single-field
+/// wrapper exists because tsify's `into_wasm_abi` needs a concrete
+/// struct (or a derived alias type), not a bare `Vec<ShieldBlock>`.
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct ShieldBlocksOut {
+    pub blocks: Vec<crate::sapling::sync::ShieldBlock>,
 }
 
 #[wasm_bindgen]
 pub fn handle_blocks(
     tree_hex: &str,
-    blocks_js: JsValue,
+    blocks: HandleBlocksInput,
     extfvk: &str,
-    notes_js: JsValue,
-) -> Result<JsValue, JsError> {
-    let blocks: Vec<crate::sapling::sync::ShieldBlock> =
-        serde_wasm_bindgen::from_value(blocks_js).map_err(to_js_err)?;
-    let notes: Vec<crate::wallet::SerializedNote> =
-        serde_wasm_bindgen::from_value(notes_js).map_err(to_js_err)?;
+    notes: SerializedNotesInput,
+) -> Result<crate::sapling::sync::HandleBlocksResult, JsError> {
+    crate::sapling::sync::handle_blocks(tree_hex, blocks.blocks, extfvk, &notes.notes)
+        .map_err(to_js_err)
+}
 
-    let result = crate::sapling::sync::handle_blocks(tree_hex, blocks, extfvk, &notes)
-        .map_err(to_js_err)?;
-    serde_wasm_bindgen::to_value(&result).map_err(to_js_err)
+/// Input wrapper for [`handle_blocks`] — concrete struct so tsify's
+/// `from_wasm_abi` has a target type.
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(from_wasm_abi)]
+pub struct HandleBlocksInput {
+    pub blocks: Vec<crate::sapling::sync::ShieldBlock>,
+}
+
+/// Input wrapper for the `notes` parameter of [`handle_blocks`].
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(from_wasm_abi)]
+pub struct SerializedNotesInput {
+    pub notes: Vec<crate::wallet::SerializedNote>,
 }
 
 #[wasm_bindgen]
@@ -214,29 +244,38 @@ pub fn has_sapling_params() -> bool {
 // Transaction builders
 // ---------------------------------------------------------------------------
 
-/// Output shape of build_*_tx bindings: `{ result, wallet }` — a JS object with
-/// two named fields, not a tuple.
-#[derive(serde::Serialize)]
-struct BuildTxResult<'a, T: serde::Serialize> {
-    result: &'a T,
-    wallet: &'a WalletData,
+/// Output of [`build_shield_tx`]. Carries the freshly-built shield tx
+/// alongside the post-build wallet state (notes are mutated; caller
+/// must persist the returned wallet).
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct BuildShieldTxOutput {
+    pub result: crate::sapling::builder::TransactionResult,
+    pub wallet: WalletData,
+}
+
+/// Output of [`build_transparent_tx`]. Same shape as
+/// [`BuildShieldTxOutput`] but carries the transparent-builder result.
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct BuildTransparentTxOutput {
+    pub result: crate::transparent::builder::TransparentTransactionResult,
+    pub wallet: WalletData,
 }
 
 #[wasm_bindgen]
 pub fn build_shield_tx(
-    wallet_js: JsValue,
+    mut wallet: WalletData,
     to_address: &str,
     amount: u64,
     memo: &str,
     block_height: u32,
-) -> Result<JsValue, JsError> {
-    let mut w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
-
+) -> Result<BuildShieldTxOutput, JsError> {
     let prover = PROVER
         .get()
         .ok_or_else(|| JsError::new("Sapling prover not loaded — call load_sapling_params first"))?;
-    let r = crate::sapling::builder::create_shield_transaction(
-        &mut w,
+    let result = crate::sapling::builder::create_shield_transaction(
+        &mut wallet,
         to_address,
         amount,
         memo,
@@ -244,12 +283,7 @@ pub fn build_shield_tx(
         prover,
     )
     .map_err(to_js_err)?;
-
-    serde_wasm_bindgen::to_value(&BuildTxResult {
-        result: &r,
-        wallet: &w,
-    })
-    .map_err(to_js_err)
+    Ok(BuildShieldTxOutput { result, wallet })
 }
 
 /// Build a transparent-source transaction (either transparent- or shield-dest).
@@ -261,16 +295,14 @@ pub fn build_shield_tx(
 /// (and `block_height` to be the current chain tip + 1).
 #[wasm_bindgen]
 pub fn build_transparent_tx(
-    wallet_js: JsValue,
+    mut wallet: WalletData,
     bip39_seed: &[u8],
     to_address: &str,
     amount: u64,
     block_height: u32,
-) -> Result<JsValue, JsError> {
-    let mut w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
-
-    let r = crate::transparent::builder::create_raw_transparent_transaction(
-        &mut w,
+) -> Result<BuildTransparentTxOutput, JsError> {
+    let result = crate::transparent::builder::create_raw_transparent_transaction(
+        &mut wallet,
         bip39_seed,
         to_address,
         amount,
@@ -278,12 +310,7 @@ pub fn build_transparent_tx(
         PROVER.get(),
     )
     .map_err(to_js_err)?;
-
-    serde_wasm_bindgen::to_value(&BuildTxResult {
-        result: &r,
-        wallet: &w,
-    })
-    .map_err(to_js_err)
+    Ok(BuildTransparentTxOutput { result, wallet })
 }
 
 // ---------------------------------------------------------------------------
@@ -369,30 +396,34 @@ pub fn verify_message(
 
 /// Convert a Blockbook API v2 `/api/v2/utxo/{address}` response into
 /// `Vec<SerializedUTXO>`. Handy for browser wallets fetching UTXOs directly
-/// from a Blockbook endpoint.
+/// from a Blockbook endpoint. Input is the raw JSON array as returned
+/// by Blockbook (kept as `JsValue` because the caller wires Blockbook's
+/// schema and we want to be permissive about minor shape drift).
 #[wasm_bindgen]
-pub fn parse_blockbook_utxos(raw: JsValue) -> Result<JsValue, JsError> {
+pub fn parse_blockbook_utxos(raw: JsValue) -> Result<BlockbookUtxosOut, JsError> {
     let raw: Vec<serde_json::Value> =
         serde_wasm_bindgen::from_value(raw).map_err(to_js_err)?;
-    let utxos = crate::wallet::parse_blockbook_utxos(&raw);
-    serde_wasm_bindgen::to_value(&utxos).map_err(to_js_err)
+    Ok(BlockbookUtxosOut {
+        utxos: crate::wallet::parse_blockbook_utxos(&raw),
+    })
 }
 
-/// Sum the spendable shield balance from a `WalletData`, in satoshis.
-///
-/// Uses the kit's own `WalletData::get_balance` so browser consumers don't
-/// have to know the internal JSON shape of a Sapling `Note`.
-#[wasm_bindgen]
-pub fn wallet_shield_balance_sat(wallet_js: JsValue) -> Result<u64, JsError> {
-    let w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
-    Ok(w.get_balance())
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi)]
+pub struct BlockbookUtxosOut {
+    pub utxos: Vec<crate::wallet::SerializedUTXO>,
 }
 
-/// Sum the transparent balance from a `WalletData`, in satoshis.
+/// Sum the spendable shield balance from a [`WalletData`], in satoshis.
 #[wasm_bindgen]
-pub fn wallet_transparent_balance_sat(wallet_js: JsValue) -> Result<u64, JsError> {
-    let w: WalletData = serde_wasm_bindgen::from_value(wallet_js).map_err(to_js_err)?;
-    Ok(w.get_transparent_balance())
+pub fn wallet_shield_balance_sat(wallet: WalletData) -> u64 {
+    wallet.get_balance()
+}
+
+/// Sum the transparent balance from a [`WalletData`], in satoshis.
+#[wasm_bindgen]
+pub fn wallet_transparent_balance_sat(wallet: WalletData) -> u64 {
+    wallet.get_transparent_balance()
 }
 
 /// Diagnostic: returns the Sapling commitment tree's current size (= the

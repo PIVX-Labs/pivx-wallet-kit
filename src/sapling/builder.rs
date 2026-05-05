@@ -23,7 +23,8 @@ use std::io::Cursor;
 use std::str::FromStr;
 
 /// Result of building a shield transaction.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct TransactionResult {
     pub txhex: String,
     pub nullifiers: Vec<String>,

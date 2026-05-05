@@ -28,7 +28,8 @@ use std::io::Cursor;
 pub const DEPTH: u8 = 32;
 
 /// One block's worth of shield data — raw tx bytes, keyed to a block height.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct ShieldBlock {
     pub height: u32,
     pub txs: Vec<Vec<u8>>,
@@ -36,7 +37,8 @@ pub struct ShieldBlock {
 
 /// Output of [`handle_blocks`]: everything a caller needs to update their
 /// persisted wallet state.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct HandleBlocksResult {
     /// Hex-encoded updated commitment tree.
     pub commitment_tree: String,

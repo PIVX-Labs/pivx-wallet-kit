@@ -30,14 +30,16 @@ use zcash_transparent::bundle::OutPoint;
 /// the (txid, vout) pair the wallet uses to mark its UTXO set after
 /// broadcast. Named-field struct so generated TS bindings get
 /// `{txid: string, vout: number}[]` instead of `[string, number][]`.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct SpentOutpoint {
     pub txid: String,
     pub vout: u32,
 }
 
 /// Result of building a transparent transaction.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct TransparentTransactionResult {
     pub txhex: String,
     /// UTXOs consumed by this tx — remove from the wallet after broadcast

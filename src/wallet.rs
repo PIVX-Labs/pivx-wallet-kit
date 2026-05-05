@@ -14,7 +14,8 @@ use std::error::Error;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// A serializable spendable Sapling note (mirrors pivx-shield-rust's JSSpendableNote).
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct SerializedNote {
     /// Sapling `Note` serialized as JSON.
     pub note: serde_json::Value,
@@ -30,7 +31,8 @@ pub struct SerializedNote {
 }
 
 /// A transparent unspent transaction output.
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct SerializedUTXO {
     pub txid: String,
     pub vout: u32,
@@ -80,7 +82,8 @@ pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
 /// Sensitive fields (`seed`, `mnemonic`) are intended to be encrypted by the
 /// consumer before being written to storage, via [`encrypt_secrets`] /
 /// [`decrypt_secrets`]. In memory, they are zeroized on drop.
-#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct WalletData {
     #[zeroize(skip)]
     pub version: u32,
