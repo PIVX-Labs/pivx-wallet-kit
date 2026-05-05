@@ -55,7 +55,8 @@ cargo build --release
 # WASM (wasm-pack), bundler target for npm
 wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (53 total: 14 unit + 39 integration with real mainnet tx fixtures)
+# Tests (55 total: 14 unit + 2 messages + 39 integration with real
+# mainnet tx fixtures)
 cargo test
 ```
 
@@ -146,13 +147,16 @@ wallet.applyBlocks(blocks);
 const shieldSat = wallet.shieldBalanceSat();
 
 // Build a transparent → transparent tx (no prover required).
+// Direct `u64` wasm-bindgen args take BigInt:
 const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
 
 // Build a shield-source tx (load proving params once per session).
+// `SendShieldOpts` is a tsify struct — its `u64` fields cross via
+// serde_wasm_bindgen and take a regular number, NOT BigInt.
 const params = new SaplingParams(outputParamsBytes, spendParamsBytes);
 const shieldTx = wallet.sendShield({
   to_address: shieldAddress,
-  amount_sat: 50_000n,
+  amount_sat: 50000,
   memo: '',
   block_height: chainTip,
 }, params);

@@ -5,9 +5,14 @@
 // encrypt/decrypt round-trip that a real web wallet would use before writing
 // the wallet JSON to localStorage / IndexedDB.
 //
-// Assumes `wasm-pack build --release --target web` was run at the repo root
-// so that `../../pkg/` exists. A `./pkg/` symlink or copy works too if this
-// example is served on its own.
+// Build prerequisite: this example imports the kit directly via a relative
+// `<script type="module">` URL, which requires the `--target web` output:
+//
+//     wasm-pack build --release --target web
+//
+// NOTE: that overwrites `../../pkg/` with the web-target shape. The npm
+// publish artifact is built with `--target bundler` instead — running both
+// from the same checkout means re-running the publish build before tagging.
 
 import init, {
   Wallet,

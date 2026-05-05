@@ -1,6 +1,6 @@
 //! WASM bindings — class-style API for JS/TS consumers.
 //!
-//! See `DESIGN-v0.2.md` for the full spec. The shape is:
+//! Surface:
 //!
 //!   - `Wallet` — owns the wallet state and secret material.
 //!   - `SaplingParams` — holds the verified Groth16 proving keys.
