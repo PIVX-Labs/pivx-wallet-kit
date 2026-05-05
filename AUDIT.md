@@ -1,5 +1,93 @@
 # pivx-wallet-kit audit
 
+## Status as of 2026-05-05 (Phase 0 refresh, pre-NPM-publish)
+
+Verified item-by-item against current source (`HEAD = 7eef42d`). The
+remaining open set is the v0.2.0 pre-release scope — nothing critical
+left, but a healthy backlog of API-cleanliness, perf, and polish
+items.
+
+**Closed since the original audit was written:**
+- B1 — clone_wallet_for_disk seed leak (fixed in agent-kit; replaced
+  with field-by-field clone)
+- B2 — thread_local! prover under multicore (now `OnceLock` in wasm.rs)
+- B3 — handle_blocks empty-slice panic + hardcoded BlockHeight 320
+  (now takes `block_height: u32` and reads via Transaction::read with
+  proper error propagation)
+- H1 — mandatory prover for transparent-only v3 txs (gated behind
+  is_shield_dest; pure transparent path no longer pays prover cost)
+- H2 — agent-kit shim block_count fetch on every transparent send
+  (now gated on `to_address.starts_with("ps")`)
+- H3 — tuple JsValue → JS array (now BuildTxResult struct with named
+  `result` and `wallet` fields)
+- H5 — empty-tree check missing "000000" (now centralised
+  `crate::sapling::tree::is_empty_tree_hex`)
+- H8 — parse_shield_stream unbounded (now caps via
+  `DEFAULT_MAX_SHIELD_BLOCKS = 10_000` with caller override)
+- M3 — agent-kit unused `sapling` direct dep (removed)
+- M10 — decrypt_secrets in-place corruption on wrong-key error
+  (decrypts into scratch, validates extfvk, only commits on success)
+- N4 — disk round-trip test (added `wallet_disk_roundtrip_preserves_decryption`
+  and `wallet_serialize_encrypted_roundtrip`)
+- N8 — dead `_use_incremental_witness` helper (removed)
+
+**Re-opened or never-closed (B4 is documented and considered
+acceptable as-is — see B4 below):**
+
+| ID | Title | Notes |
+|----|-------|-------|
+| B4 | Zip212Enforcement::Off in handle_blocks | Now documented in source as deliberate (PIVX mainnet hasn't activated ZIP-212-equivalent). Promoted to non-issue; leave as-is until activation. |
+| H4 | spending_key_from_seed accepts any coin_type | Still parametric; v0.2.0 will drop or wrap in `Network` enum. |
+| H6 | handle_blocks clones SerializedNote.note per block batch | Still `&[SerializedNote]` + `n.note.clone()`. v0.2.0 fix. |
+| H7 | O(n²) witness advancement in handle_blocks inner loop | Still present. Investigate scan_block batched advancement; may slip to v0.3 if non-blocking. |
+| H9 | Cargo.lock committed to library crate | Still committed. v0.2.0: resolve `core2 = 0.3.3` yanked, drop the lock. |
+| M1 | Direct `incrementalmerkletree = "0.7"` dep risks skew with pivx_primitives | Still in Cargo.toml. v0.2.0 cleanup. |
+| M2 | `[patch.crates-io]` includes orchard | Still undocumented. v0.2.0: add an inline comment explaining it's load-bearing for librustpivx's transitive dep. |
+| M4 | get_bip39_seed panics on invalid mnemonic | Still `.expect("Stored mnemonic should always be valid")`. v0.2.0: return `Result`, wrap output in `Zeroizing`. |
+| M5 | TransparentTransactionResult.spent: Vec<(String, u32)> | Still unnamed tuple. Becomes `[string, number][]` in TS. v0.2.0: `Vec<SpentOutpoint { txid, vout }>`. |
+| M6 | derive_extsk returns encoded String — round-trips on every send | Still returns `Result<String, …>`. v0.2.0: return `ExtendedSpendingKey` directly + add `derive_extsk_encoded()` helper. |
+| M7 | SaplingProver = (OutputParameters, SpendParameters) tuple alias | Still a type alias. v0.2.0: struct with named `output` / `spend` fields. |
+| M8 | Builder fee inner loop parses all witnesses | Still parse-then-select. v0.2.0: select-then-parse. |
+| M9 | transparent_key_from_bip39_seed returns un-zeroized privkey | Still `Vec<u8>`. v0.2.0: `Zeroizing<Vec<u8>>` or `secp256k1::SecretKey`. |
+| N1 | lib.rs module-doc table omits `messages` and submodules | Partial coverage today. v0.2.0: complete table or `#[doc(hidden)]` simd. |
+| N2 | sapling/{notes,keys,tx}.rs are empty 1-line scaffolds | Still empty. v0.2.0: remove or fill. |
+| N3 | get_sapling_root uses `iter().rev().cloned().collect::<Vec<_>>()` | Still allocating reverse. v0.2.0: in-place `reversed.reverse()`. |
+| N5 | hex_string_to_bytes silently tolerates malformed input | Still no `_checked` variant. v0.2.0: add checked alternative + property tests. |
+| N6 | Inconsistent `Box<dyn Error>` everywhere | Still pervasive. Defer to v0.3 (cosmetic, low value). |
+| N7 | handle_blocks_processes_real_shield_tx_without_key misleading | Still in tests/integration.rs:454. v0.2.0: rename + tighten assertion. |
+| N9 | agent-kit `let _ = PROVER.set(loaded);` ignores already-set | Still silent. v0.2.0: `.expect("prover should not be set twice")`. |
+
+**New v0.2.0 items not in the original audit (added during 2026-05-05
+NPM-publish-readiness pass):**
+
+- N10 — Add `tsify = "0.4"` derive on every cross-boundary type. Without
+  it, `JsValue` returns become `any` in the generated `.d.ts`. Single
+  biggest DX win.
+- N11 — `load_sapling_params` is silently no-op on a second call with
+  different bytes; no `unload_sapling_params` exists. v0.2.0: error
+  on conflicting bytes + add `unload_sapling_params` for testnet/mainnet
+  swaps.
+- N12 — Five wasm exports take `mnemonic: &str` and ship the seed across
+  the JS↔WASM boundary on every call (validate_mnemonic, bip39_seed_from_mnemonic,
+  import_wallet, derive_transparent_address, sign_message_with_mnemonic).
+  v0.2.0: subsume into class-style Wallet; drop the loose mnemonic-taking
+  exports.
+- N13 — wasm exports are inconsistently named (`wallet_*` vs `derive_*`
+  vs `parse_*` vs no prefix). v0.2.0: pick one convention via class-style
+  refactor.
+- N14 — `build_transparent_tx`'s `block_height` parameter has two
+  contracts (ignored for transparent dest; required for shield dest).
+  v0.2.0: split into `build_transparent_to_transparent_tx` /
+  `build_transparent_to_shield_tx`.
+- N15 — `get_checkpoint(block_height: i32)` should be `u32` (heights
+  are non-negative).
+- N16 — `parse_blockbook_utxos` silently filters invalid entries; caller
+  can't tell N → M < N happened. v0.2.0: return errors alongside parsed.
+- N17 — `wasm-opt` disabled in release profile in Cargo.toml; ships ~2-3×
+  larger wasm than needed. v0.2.0: enable, measure delta.
+- N18 — `tree_position` accepts any 32-arity hex CommitmentTree without
+  validating it's PIVX-shaped. v0.2.0: defensive validation.
+
 ## Executive summary
 
 The extraction is broadly faithful — keys, fee math, shield parsing, and the raw P2PKH sighash logic all match the original almost line-for-line, and the integration test fixtures demonstrate the end-to-end parse path works on real mainnet txs. But there are three structural bugs that need fixing before this gets stamped as "v1": **(1) a zeroize regression in the agent-kit `clone_wallet_for_disk` shim that leaks raw seed bytes through an un-zeroized JSON round-trip**, **(2) `thread_local!` prover storage in `wasm.rs` is per-Web-Worker, so the `multicore` feature path will silently fail to find the prover on non-main workers**, and **(3) `handle_blocks` panics on any empty `tx_bytes` via `tx_bytes[0]`, and hardcodes `BlockHeight::from_u32(320)` for decryption regardless of the actual block height**. The kit also accidentally made `SaplingProver` mandatory for transparent-only v3 txs — a breaking API relative to the pre-extraction `Box::leak`-dummy-prover trick — which the shim papers over by always loading the prover and always fetching block height, regressing pure transparent sends from zero-RTT to two-RTT.
