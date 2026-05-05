@@ -1,3 +1,9 @@
+# NOTE: Cargo.lock is intentionally committed despite this being a
+# library crate. `core2 = 0.3.3` is yanked from crates.io and is a
+# transitive dep of librustpivx — building from a fresh resolver
+# without the lock would fail. Drop the lock once librustpivx
+# releases a build that doesn't pull yanked core2 (or once we patch
+# it via [patch.crates-io] to a non-yanked source).
 [package]
 name = "pivx-wallet-kit"
 version = "0.1.0"
@@ -14,7 +20,19 @@ name = "sign"
 path = "examples/sign.rs"
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = false
+# wasm-opt strips ~half the wasm binary size for the cost of a few
+# extra seconds at build time. Keep on for release builds; consumers
+# building from source with `cargo build` aren't affected.
+# `--enable-bulk-memory` is required because rustc emits bulk-memory
+# instructions (memory.copy) on stable since 2024.
+wasm-opt = [
+    "-O",
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "--enable-sign-ext",
+    "--enable-mutable-globals",
+    "--enable-reference-types",
+]
 
 [dependencies]
 # PIVX Sapling cryptographic libraries (librustpivx fork of zcash libs)
@@ -26,6 +44,11 @@ zcash_keys = { git = "https://github.com/Duddino/librustpivx", branch = "librust
 zcash_transparent = { git = "https://github.com/Duddino/librustpivx", branch = "librustzcash-rebase" }
 bellman = { git = "https://github.com/Duddino/librustpivx", branch = "librustzcash-rebase", features = ["groth16"] }
 zcash_note_encryption = "0.4"
+# Direct dep is unavoidable — `pivx_primitives::merkle_tree::read_commitment_tree`
+# returns `CommitmentTree` and `IncrementalWitness` from this crate, but
+# pivx_primitives doesn't re-export the types. Cargo's resolver dedupes
+# to a single instance as long as our requirement and pivx_primitives'
+# (currently 0.7.1, default-features = false) overlap on the same minor.
 incrementalmerkletree = "0.7"
 
 # Audited cryptographic primitives
@@ -62,6 +85,14 @@ tsify = { version = "0.4", default-features = false, features = ["js"] }
 default = []
 multicore = ["wasm-bindgen-rayon"]
 
+# [patch.crates-io] forces transitive deps to specific git revisions.
+# - `orchard` is load-bearing: librustpivx pulls Orchard transitively
+#   (even though PIVX doesn't use it) and the version on crates.io
+#   doesn't compile against the rebased librustzcash branch we use.
+#   Don't drop this patch unless / until librustpivx stops pulling
+#   orchard.
+# - `redjubjub` and `bellman` are pinned for the same reason — keeping
+#   their versions in lockstep with librustpivx's expectations.
 [patch.crates-io]
 orchard = { git = "https://github.com/zcash/orchard.git", rev = "c684e9185a0449efb00428f807d3bf286b5dae03" }
 redjubjub = { git = "https://github.com/ZcashFoundation/redjubjub", rev = "eae848c5c14d9c795d000dd9f4c4762d1aee7ee1" }
