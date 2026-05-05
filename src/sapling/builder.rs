@@ -92,26 +92,17 @@ pub fn create_shield_transaction(
     let fvk = dfvk.fvk().clone();
     let nk = dfvk.to_nk(Scope::External);
 
+    // Two-pass selection (M8 fix): the inner add_sapling_spend +
+    // witness-parse pair was being run for every candidate note —
+    // for a wallet with many small notes that's a lot of needless
+    // hex decode + IncrementalWitness parsing for notes we'll never
+    // spend. First pass walks values only; second pass parses
+    // witnesses and adds spends just for the selected slice.
     let mut total = 0u64;
-    let mut nullifiers = vec![];
     let mut sapling_input_count = 0u64;
     let mut fee = 0u64;
-
-    for (note, witness_hex, _) in &notes {
-        let witness = read_incremental_witness::<Node, _, { DEPTH }>(Cursor::new(
-            crate::simd::hex::hex_string_to_bytes(witness_hex),
-        ))?;
-        builder
-            .add_sapling_spend::<FeeRule>(
-                fvk.clone(),
-                note.clone(),
-                witness.path().ok_or("Empty commitment tree")?,
-            )
-            .map_err(|_| "Failed to add sapling spend")?;
-
-        let nullifier = note.nf(&nk, witness.witnessed_position().into());
-        nullifiers.push(crate::simd::hex::bytes_to_hex_string(&nullifier.to_vec()));
-
+    let mut selected = 0usize;
+    for (note, _witness_hex, _has_memo) in &notes {
         sapling_input_count += 1;
         fee = fees::estimate_fee(
             0,
@@ -120,6 +111,7 @@ pub fn create_shield_transaction(
             sapling_output_count,
         );
         total += note.value().inner();
+        selected += 1;
         if total >= amount + fee {
             break;
         }
@@ -131,6 +123,22 @@ pub fn create_shield_transaction(
             total, amount, fee
         )
         .into());
+    }
+
+    let mut nullifiers = vec![];
+    for (note, witness_hex, _) in notes.iter().take(selected) {
+        let witness = read_incremental_witness::<Node, _, { DEPTH }>(Cursor::new(
+            crate::simd::hex::hex_string_to_bytes(witness_hex),
+        ))?;
+        builder
+            .add_sapling_spend::<FeeRule>(
+                fvk.clone(),
+                note.clone(),
+                witness.path().ok_or("Empty commitment tree")?,
+            )
+            .map_err(|_| "Failed to add sapling spend")?;
+        let nullifier = note.nf(&nk, witness.witnessed_position().into());
+        nullifiers.push(crate::simd::hex::bytes_to_hex_string(&nullifier.to_vec()));
     }
 
     let send_amount = Zatoshis::from_u64(amount).map_err(|_| "Invalid amount")?;

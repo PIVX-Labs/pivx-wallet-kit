@@ -474,7 +474,7 @@ fn handle_blocks_with_unrelated_key_advances_tree_and_extracts_nullifier() {
     };
 
     let result =
-        sapling::sync::handle_blocks(tree_hex, vec![block], &random.extfvk, &[]).unwrap();
+        sapling::sync::handle_blocks(tree_hex, vec![block], &random.extfvk, vec![]).unwrap();
 
     // No decryption because the key is unrelated.
     assert!(result.new_notes.is_empty());
@@ -513,7 +513,7 @@ fn handle_blocks_processes_real_transparent_tx_without_notes() {
     };
 
     let result =
-        sapling::sync::handle_blocks(tree_hex, vec![block], &random.extfvk, &[]).unwrap();
+        sapling::sync::handle_blocks(tree_hex, vec![block], &random.extfvk, vec![]).unwrap();
 
     assert_eq!(result.nullifiers.len(), 1, "tx has 1 sapling spend");
     // Random key → no decrypted notes.

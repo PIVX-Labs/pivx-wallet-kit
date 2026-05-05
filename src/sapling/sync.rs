@@ -60,16 +60,27 @@ struct SpendableNote {
 }
 
 impl SpendableNote {
-    fn from_serialized(n: &SerializedNote) -> Result<SpendableNote, Box<dyn Error>> {
-        let note: Note = serde_json::from_value(n.note.clone())?;
-        let wit_bytes = crate::simd::hex::hex_string_to_bytes(&n.witness);
+    /// Move-construct from a `SerializedNote`. Takes ownership so the
+    /// JSON `Value` for the note can be moved into `serde_json::from_value`
+    /// rather than cloned (the audit's H6 fix — saves one allocation per
+    /// note per `handle_blocks` call).
+    fn from_serialized(n: SerializedNote) -> Result<SpendableNote, Box<dyn Error>> {
+        let SerializedNote {
+            note,
+            witness: witness_hex,
+            nullifier,
+            memo,
+            height,
+        } = n;
+        let note: Note = serde_json::from_value(note)?;
+        let wit_bytes = crate::simd::hex::hex_string_to_bytes(&witness_hex);
         let witness = read_incremental_witness(Cursor::new(wit_bytes))?;
         Ok(SpendableNote {
             note,
             witness,
-            nullifier: n.nullifier.clone(),
-            memo: n.memo.clone(),
-            height: n.height,
+            nullifier,
+            memo,
+            height,
         })
     }
 
@@ -87,11 +98,19 @@ impl SpendableNote {
 }
 
 /// Process a batch of shield blocks, decrypting notes and updating the tree.
+///
+/// Takes `existing_notes` by value rather than by slice so each note's
+/// JSON `Value` can be moved into `serde_json::from_value` instead of
+/// cloned. Native consumers that have an owned `Vec<SerializedNote>`
+/// (e.g. removed from a wallet's note set before re-adding the
+/// updated set) save one allocation per note. Consumers that only
+/// have a slice should clone before calling — the cost is the same
+/// either way, just relocated to the call site.
 pub fn handle_blocks(
     tree_hex: &str,
     blocks: Vec<ShieldBlock>,
     enc_extfvk: &str,
-    existing_notes: &[SerializedNote],
+    existing_notes: Vec<SerializedNote>,
 ) -> Result<HandleBlocksResult, Box<dyn Error>> {
     let mut tree: CommitmentTree<Node, DEPTH> =
         read_commitment_tree(Cursor::new(crate::simd::hex::hex_string_to_bytes(tree_hex)))?;
@@ -101,7 +120,7 @@ pub fn handle_blocks(
         .map_err(|_| "Failed to create unified full viewing key")?;
 
     let mut comp_notes: Vec<SpendableNote> = existing_notes
-        .iter()
+        .into_iter()
         .map(SpendableNote::from_serialized)
         .collect::<Result<Vec<_>, _>>()?;
 

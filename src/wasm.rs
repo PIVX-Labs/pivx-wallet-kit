@@ -323,31 +323,26 @@ impl Wallet {
         &mut self,
         blocks: ShieldBlocksInput,
     ) -> Result<HandleBlocksResult, JsError> {
+        // handle_blocks takes ownership of the existing notes (H6
+        // optimisation — moves the JSON values into from_serialized
+        // instead of cloning each one). std::mem::take swaps the
+        // wallet's notes out for an empty Vec; we'll repopulate
+        // from the result.
+        let existing = std::mem::take(&mut self.inner.unspent_notes);
         let result = crate::sapling::sync::handle_blocks(
             &self.inner.commitment_tree,
             blocks.blocks,
             &self.inner.extfvk,
-            &self.inner.unspent_notes,
+            existing,
         )
         .map_err(js_err)?;
-        // Apply the deltas to the wallet's internal state. The
-        // returned `HandleBlocksResult` is the same data the caller
-        // would otherwise have to translate back themselves.
+        // handle_blocks's `updated_notes` is the post-batch state of
+        // every existing note that survived this batch (witnesses
+        // advanced, no nullifier match). Anything spent doesn't
+        // appear there. `new_notes` is what was newly discovered.
         self.inner.commitment_tree = result.commitment_tree.clone();
-        self.inner
-            .unspent_notes
-            .retain(|n| !result.nullifiers.contains(&n.nullifier));
+        self.inner.unspent_notes = result.updated_notes.clone();
         self.inner.unspent_notes.extend(result.new_notes.clone());
-        for updated in &result.updated_notes {
-            if let Some(slot) = self
-                .inner
-                .unspent_notes
-                .iter_mut()
-                .find(|n| n.nullifier == updated.nullifier)
-            {
-                *slot = updated.clone();
-            }
-        }
         Ok(result)
     }
 
