@@ -494,8 +494,21 @@ pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
 /// Convert hex string to bytes (arbitrary length).
 ///
 /// Uses SIMD for the bulk of the conversion when input is large enough.
+///
+/// **Truncation note:** an odd-length input silently drops the trailing
+/// nibble (e.g. `"abc"` → `[0xab]`, not `[0xab, 0x0c]`). PIVX wire formats
+/// produce even-length hex by construction (32-byte nullifiers, witnesses,
+/// commitment trees, etc.), so internal callers are safe. External
+/// hex coming off the network goes through this same function — keep
+/// that in mind if you ever ingest hex from an untrusted source. Debug
+/// builds assert against odd-length input to catch the case during dev.
 #[allow(clippy::uninit_vec)] // SIMD paths write every byte before the buffer is read
 pub fn hex_string_to_bytes(s: &str) -> Vec<u8> {
+    debug_assert!(
+        s.len() % 2 == 0,
+        "hex_string_to_bytes called with odd-length input ({}); trailing nibble will be dropped",
+        s.len()
+    );
     let h = s.as_bytes();
     let out_len = h.len() / 2;
     let mut result = Vec::with_capacity(out_len);

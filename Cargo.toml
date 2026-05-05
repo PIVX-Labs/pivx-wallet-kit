@@ -6,7 +6,7 @@
 # it via [patch.crates-io] to a non-yanked source).
 [package]
 name = "pivx-wallet-kit"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "PIVX Wallet Kit — pure-Rust wallet primitives with Sapling shield support, WASM-ready"
 repository = "https://github.com/PIVX-Labs/pivx-wallet-kit"

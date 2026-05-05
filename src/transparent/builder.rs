@@ -111,7 +111,14 @@ pub fn create_shielding_transaction(
 
     for utxo in &utxos {
         selected.push(utxo.clone());
-        total += utxo.amount;
+        // checked_add: explorer responses are untrusted input; a
+        // malicious or buggy Blockbook serving u64::MAX in `amount`
+        // could overflow the running total. Surface as a clear
+        // "explorer is broken" error rather than a debug-build panic
+        // or a release-build silent wrap to a small balance.
+        total = total
+            .checked_add(utxo.amount)
+            .ok_or("UTXO total overflow — explorer returned malformed amounts")?;
         fee = fees::estimate_fee(
             selected.len() as u64,
             transparent_output_count,
@@ -259,7 +266,12 @@ pub fn create_raw_transparent_transaction(
 
     for utxo in &utxos {
         selected.push(utxo.clone());
-        total += utxo.amount;
+        // checked_add: see the matching guard in
+        // create_shielding_transaction — UTXOs come from explorers,
+        // not internal code, so we can't trust their values to fit.
+        total = total
+            .checked_add(utxo.amount)
+            .ok_or("UTXO total overflow — explorer returned malformed amounts")?;
         let fee = fees::estimate_raw_transparent_fee(selected.len(), 2);
         if total >= amount + fee {
             break;

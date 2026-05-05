@@ -302,6 +302,26 @@ mod tests {
     }
 
     #[test]
+    fn sort_order_picks_non_memo_even_when_memo_is_smaller() {
+        // Distinguishes "non-memo first" from "smallest first": the
+        // memo'd note (idx 0) has a SMALLER value than the non-memo
+        // note (idx 1), so a value-only sort would pick idx 0 first.
+        // The correct order picks idx 1 first because it has no memo,
+        // even though it's larger.
+        //
+        // 4M (non-memo) covers amount=1M + fee 2.38M = 3.38M.
+        let notes = vec![
+            note(2_000_000, Some("memo")), // 0: SMALLER but memo'd
+            note(4_000_000, None),         // 1: LARGER but no-memo  ← should win
+        ];
+        let sel = select_shield_notes(&notes, 1_000_000, 0, 2).unwrap();
+        assert_eq!(
+            sel.indexes[0], 1,
+            "non-memo notes must rank ahead of memo'd notes even when the memo'd note is smaller"
+        );
+    }
+
+    #[test]
     fn selection_walks_until_total_covers_amount_plus_fee() {
         // Several non-memo notes; selection should accumulate inputs
         // until total >= amount + fee.

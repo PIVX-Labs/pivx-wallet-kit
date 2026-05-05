@@ -94,6 +94,19 @@ pub fn parse_next_blocks(
         }
     }
 
+    // PivxNodeController-compat path: txs accumulate locally and only
+    // attach to a block on its footer. If the stream ends while txs
+    // are still buffered, the remote sent us a truncated batch — bail
+    // loudly instead of silently dropping whatever we managed to read.
+    // (Compact format never uses this buffer; this guard is a no-op there.)
+    if !txs.is_empty() {
+        return Err(format!(
+            "shield stream truncated: {} buffered txs without a block footer",
+            txs.len()
+        )
+        .into());
+    }
+
     if blocks.is_empty() {
         Ok(None)
     } else {
