@@ -505,7 +505,7 @@ pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
 #[allow(clippy::uninit_vec)] // SIMD paths write every byte before the buffer is read
 pub fn hex_string_to_bytes(s: &str) -> Vec<u8> {
     debug_assert!(
-        s.len() % 2 == 0,
+        s.len().is_multiple_of(2),
         "hex_string_to_bytes called with odd-length input ({}); trailing nibble will be dropped",
         s.len()
     );
