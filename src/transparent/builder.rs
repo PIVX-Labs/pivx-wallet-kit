@@ -26,12 +26,23 @@ use sha2::{Digest, Sha256};
 use std::error::Error;
 use zcash_transparent::bundle::OutPoint;
 
+/// A reference to a UTXO that was consumed by a transparent send —
+/// the (txid, vout) pair the wallet uses to mark its UTXO set after
+/// broadcast. Named-field struct so generated TS bindings get
+/// `{txid: string, vout: number}[]` instead of `[string, number][]`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SpentOutpoint {
+    pub txid: String,
+    pub vout: u32,
+}
+
 /// Result of building a transparent transaction.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct TransparentTransactionResult {
     pub txhex: String,
-    /// UTXOs consumed, as `(txid, vout)` pairs — remove from wallet after broadcast.
-    pub spent: Vec<(String, u32)>,
+    /// UTXOs consumed by this tx — remove from the wallet after broadcast
+    /// via [`crate::wallet::WalletData::finalize_transparent_send`].
+    pub spent: Vec<SpentOutpoint>,
     pub amount: u64,
     pub fee: u64,
 }
@@ -178,15 +189,15 @@ pub fn create_shielding_transaction(
         &[],
         &[],
         OsRng,
-        &prover.1,
-        &prover.0,
+        &prover.spend,
+        &prover.output,
         &fee_rule,
     )?;
 
     let mut tx_hex = vec![];
     result.transaction().write(&mut tx_hex)?;
 
-    let spent: Vec<(String, u32)> = selected.iter().map(|u| (u.txid.clone(), u.vout)).collect();
+    let spent: Vec<SpentOutpoint> = selected.iter().map(|u| SpentOutpoint { txid: u.txid.clone(), vout: u.vout }).collect();
 
     Ok(TransparentTransactionResult {
         txhex: crate::simd::hex::bytes_to_hex_string(&tx_hex),
@@ -311,7 +322,7 @@ pub fn create_raw_transparent_transaction(
     // Locktime
     signed_tx.extend_from_slice(&0u32.to_le_bytes());
 
-    let spent: Vec<(String, u32)> = selected.iter().map(|u| (u.txid.clone(), u.vout)).collect();
+    let spent: Vec<SpentOutpoint> = selected.iter().map(|u| SpentOutpoint { txid: u.txid.clone(), vout: u.vout }).collect();
 
     Ok(TransparentTransactionResult {
         txhex: crate::simd::hex::bytes_to_hex_string(&signed_tx),

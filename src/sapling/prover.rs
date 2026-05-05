@@ -11,8 +11,15 @@ use sapling::circuit::{OutputParameters, SpendParameters};
 use sha2::{Digest, Sha256};
 use std::error::Error;
 
-/// Loaded Groth16 proving parameter pair: `(output_params, spend_params)`.
-pub type SaplingProver = (OutputParameters, SpendParameters);
+/// Loaded Groth16 proving parameter pair.
+///
+/// Named-field struct rather than a tuple alias so cross-language
+/// generated bindings (e.g. wasm-bindgen + tsify) carry meaningful
+/// names instead of `[any, any]`. Construct via [`verify_and_load_params`].
+pub struct SaplingProver {
+    pub output: OutputParameters,
+    pub spend: SpendParameters,
+}
 
 fn sha256_hex(data: &[u8]) -> String {
     crate::simd::hex::bytes_to_hex_string(&Sha256::digest(data))
@@ -34,8 +41,8 @@ pub fn verify_and_load_params(
         return Err("SHA256 mismatch for sapling spend parameters".into());
     }
 
-    let output_params = OutputParameters::read(output_bytes, false)?;
-    let spend_params = SpendParameters::read(spend_bytes, false)?;
+    let output = OutputParameters::read(output_bytes, false)?;
+    let spend = SpendParameters::read(spend_bytes, false)?;
 
-    Ok((output_params, spend_params))
+    Ok(SaplingProver { output, spend })
 }

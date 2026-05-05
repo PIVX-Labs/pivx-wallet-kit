@@ -7,7 +7,6 @@
 
 use crate::checkpoints;
 use crate::keys;
-use crate::params::PIVX_COIN_TYPE;
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -126,10 +125,23 @@ impl WalletData {
             .sum()
     }
 
-    /// Derive the extended spending key on-the-fly from the stored seed.
-    pub fn derive_extsk(&self) -> Result<String, Box<dyn Error>> {
-        let extsk = keys::spending_key_from_seed(&self.seed, PIVX_COIN_TYPE, 0)?;
-        Ok(keys::encode_extsk(&extsk))
+    /// Derive the extended Sapling spending key on-the-fly from the
+    /// stored seed.
+    ///
+    /// Returns the typed key directly — callers that need to feed it
+    /// into the builder no longer pay an encode/decode round-trip on
+    /// every shield send. For consumers that need the bech32 string
+    /// form (persistence, RPC, display), use [`derive_extsk_encoded`].
+    pub fn derive_extsk(&self) -> Result<::sapling::zip32::ExtendedSpendingKey, Box<dyn Error>> {
+        keys::spending_key_from_seed(&self.seed, 0)
+    }
+
+    /// Like [`derive_extsk`] but returns the bech32-encoded string form.
+    /// Convenient for persistence and RPC integration; for in-process
+    /// signing prefer the typed [`derive_extsk`] above to avoid the
+    /// encode/decode round-trip.
+    pub fn derive_extsk_encoded(&self) -> Result<String, Box<dyn Error>> {
+        Ok(keys::encode_extsk(&self.derive_extsk()?))
     }
 
     /// Get the mnemonic (for export only).
@@ -171,9 +183,9 @@ impl WalletData {
     }
 
     /// Remove spent UTXOs after a transparent send.
-    pub fn finalize_transparent_send(&mut self, spent: &[(String, u32)]) {
+    pub fn finalize_transparent_send(&mut self, spent: &[crate::transparent::builder::SpentOutpoint]) {
         self.unspent_utxos.retain(|u| {
-            !spent.iter().any(|(txid, vout)| u.txid == *txid && u.vout == *vout)
+            !spent.iter().any(|s| u.txid == s.txid && u.vout == s.vout)
         });
     }
 
@@ -239,7 +251,7 @@ fn create_wallet_from_mnemonic(
     seed.copy_from_slice(&bip39_seed[..32]);
     bip39_seed.zeroize();
 
-    let extsk = keys::spending_key_from_seed(&seed, PIVX_COIN_TYPE, 0)?;
+    let extsk = keys::spending_key_from_seed(&seed, 0)?;
     let extfvk = keys::full_viewing_key(&extsk);
 
     let (checkpoint_height, commitment_tree) =
@@ -376,7 +388,7 @@ pub fn decrypt_secrets(data: &mut WalletData, key: &[u8; 32]) -> Result<(), Box<
     };
 
     // Validate before mutating `data`.
-    let extsk = match keys::spending_key_from_seed(&candidate_seed, PIVX_COIN_TYPE, 0) {
+    let extsk = match keys::spending_key_from_seed(&candidate_seed, 0) {
         Ok(k) => k,
         Err(e) => {
             candidate_seed.zeroize();

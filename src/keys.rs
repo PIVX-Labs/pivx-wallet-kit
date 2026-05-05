@@ -24,15 +24,21 @@ pub enum GenericAddress {
     Transparent(TransparentAddress),
 }
 
-/// Derive an extended Sapling spending key from a 32-byte seed.
+/// Derive an extended Sapling spending key from a 32-byte seed,
+/// at the BIP44 path `m/32'/PIVX_COIN_TYPE'/account_index'`.
+///
+/// `coin_type` was previously a parameter but everything else in the
+/// kit hardwires PIVX, so it was a footgun (callers passing `0`
+/// would derive a Bitcoin-shaped key that the kit then encodes with
+/// PIVX HRPs). PIVX is now hardcoded; if/when other networks are
+/// supported the function will accept a `Network` enum instead.
 pub fn spending_key_from_seed(
     seed: &[u8; 32],
-    coin_type: u32,
     account_index: u32,
 ) -> Result<ExtendedSpendingKey, Box<dyn Error>> {
     let account_id =
         AccountId::try_from(account_index).map_err(|_| "Invalid account index")?;
-    Ok(sapling_keys::spending_key(seed, coin_type, account_id))
+    Ok(sapling_keys::spending_key(seed, PIVX_COIN_TYPE, account_id))
 }
 
 /// Derive the extended full viewing key from an extended spending key.

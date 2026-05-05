@@ -43,7 +43,7 @@ pub fn create_shield_transaction(
     block_height: u32,
     prover: &SaplingProver,
 ) -> Result<TransactionResult, Box<dyn Error>> {
-    let extsk = keys::decode_extsk(&wallet.derive_extsk()?)?;
+    let extsk = wallet.derive_extsk()?;
     let network = Network::MainNetwork;
 
     let mut notes: Vec<(Note, String, bool)> = wallet
@@ -170,8 +170,8 @@ pub fn create_shield_transaction(
         &[extsk],
         &[],
         OsRng,
-        &prover.1,
-        &prover.0,
+        &prover.spend,
+        &prover.output,
         &FeeRule::non_standard(Zatoshis::from_u64(fee).map_err(|_| "Invalid fee")?),
     )?;
 

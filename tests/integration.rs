@@ -105,7 +105,7 @@ fn derive_shield_address_from_mnemonic() {
     let mut bip39_seed = mnemonic.to_seed("");
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&bip39_seed[..32]);
-    let extsk = keys::spending_key_from_seed(&seed, params::PIVX_COIN_TYPE, 0).unwrap();
+    let extsk = keys::spending_key_from_seed(&seed, 0).unwrap();
     let extfvk = keys::full_viewing_key(&extsk);
     let encoded_extfvk = keys::encode_extfvk(&extfvk);
     let shield_addr = keys::get_default_address(&encoded_extfvk).unwrap();
@@ -593,7 +593,7 @@ fn transparent_to_shield_requires_prover() {
     let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
     let mut seed = [0u8; 32];
     seed.copy_from_slice(&mnemonic.to_seed("")[..32]);
-    let extsk = keys::spending_key_from_seed(&seed, params::PIVX_COIN_TYPE, 0).unwrap();
+    let extsk = keys::spending_key_from_seed(&seed, 0).unwrap();
     let extfvk = keys::full_viewing_key(&extsk);
     let shield_dest = keys::get_default_address(&keys::encode_extfvk(&extfvk)).unwrap();
 
