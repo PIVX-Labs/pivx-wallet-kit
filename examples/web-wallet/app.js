@@ -1,4 +1,4 @@
-// PIVX Wallet Kit — tiny browser demo.
+// PIVX Wallet Kit — tiny browser demo (v0.2 class-style API).
 //
 // Loads the WASM, derives addresses from a BIP39 mnemonic, fetches transparent
 // UTXOs from Blockbook and sums them via the kit's parser, and demonstrates the
@@ -10,24 +10,17 @@
 // example is served on its own.
 
 import init, {
-  generate_mnemonic,
-  validate_mnemonic,
-  import_wallet,
-  derive_shield_address,
-  derive_transparent_address,
-  encrypt_wallet,
-  decrypt_wallet,
-  parse_blockbook_utxos,
-  parse_shield_stream,
-  handle_blocks,
-  wallet_shield_balance_sat,
-  format_sat_to_piv,
+  Wallet,
+  Mnemonic,
+  parseBlockbookUtxos,
+  parseShieldStream,
+  formatSatToPiv,
 } from '../../pkg/pivx_wallet_kit.js';
 
 const RPC = 'https://rpc.pivxla.bz/mainnet';
 const EXPLORER = 'https://explorer.pivxla.bz';
 /// Process decoded blocks in chunks of this size when feeding them to
-/// `handle_blocks`. This is purely for progress UI — the full stream is
+/// `wallet.applyBlocks`. This is purely for progress UI — the full stream is
 /// fetched and parsed in one go, so batch boundaries don't truncate.
 const SHIELD_HANDLE_CHUNK = 500;
 
@@ -40,56 +33,61 @@ async function passphraseToKey(passphrase) {
   return new Uint8Array(digest);
 }
 
-function truncateSecret(value) {
-  if (typeof value !== 'string' || value.length < 20) return value;
-  return value.slice(0, 10) + '…' + value.slice(-6);
-}
-
-/** Render the wallet JSON with the most sensitive fields truncated for display. */
+/** Render a snapshot of wallet-visible state for the demo's debug panel. */
 function renderState(wallet) {
-  const display = { ...wallet };
-  if (display.mnemonic) display.mnemonic = truncateSecret(display.mnemonic);
-  if (display.seed) display.seed = '[…]';
-  $('state').textContent = JSON.stringify(display, null, 2);
+  const view = {
+    locked: !wallet.isUnlocked(),
+    last_block: wallet.lastBlock(),
+    birthday: wallet.birthdayHeight(),
+    shield_balance_sat: wallet.shieldBalanceSat().toString(),
+    transparent_balance_sat: wallet.transparentBalanceSat().toString(),
+    unspent_notes: wallet.notes().notes.length,
+    unspent_utxos: wallet.utxos().utxos.length,
+  };
+  $('state').textContent = JSON.stringify(view, null, 2);
 }
 
 async function main() {
   await init();
 
+  /** @type {Wallet | null} */
   let wallet = null;
 
   $('generate').onclick = () => {
-    $('mnemonic').value = generate_mnemonic();
+    $('mnemonic').value = Mnemonic.generate();
   };
 
   $('import').onclick = async () => {
     const mnemonic = $('mnemonic').value.trim();
-    if (!validate_mnemonic(mnemonic)) {
+    if (!Mnemonic.validate(mnemonic)) {
       alert('Invalid BIP39 mnemonic.');
       return;
     }
 
-    // Fetch the current chain tip so import_wallet picks the latest embedded
-    // checkpoint. Without this, the wallet birthday defaults to the earliest
-    // checkpoint (~2.7M) and a full shield sync would be impractically large.
+    // Fetch the current chain tip so Wallet.fromMnemonic picks the latest
+    // embedded checkpoint. Without this, the wallet birthday defaults to the
+    // earliest checkpoint (~2.7M) and a full shield sync would be impractical.
     let currentHeight = 0;
     try {
       const resp = await fetch(`${RPC}/getblockcount`);
       if (resp.ok) currentHeight = parseInt((await resp.text()).trim(), 10) || 0;
     } catch { /* fall back to 0 */ }
 
-    wallet = import_wallet(mnemonic, currentHeight);
+    // Free the previous Wallet (if any) so its WASM heap allocation is
+    // reclaimed before we replace it.
+    if (wallet) wallet.free();
+    wallet = Wallet.fromMnemonic(mnemonic, currentHeight);
 
-    $('shield-addr').textContent = derive_shield_address(wallet.extfvk);
-    $('transparent-addr').textContent = derive_transparent_address(mnemonic);
+    $('shield-addr').textContent = wallet.shieldAddress();
+    $('transparent-addr').textContent = wallet.transparentAddress();
     $('wallet-view').style.display = 'block';
 
     renderState(wallet);
   };
 
   $('balance').onclick = async () => {
-    const addr = $('transparent-addr').textContent;
-    if (!addr) return;
+    if (!wallet) return;
+    const addr = wallet.transparentAddress();
     $('balance-result').innerHTML = '<span class="muted">Fetching…</span>';
 
     try {
@@ -97,13 +95,21 @@ async function main() {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const raw = await resp.json();
 
-      const utxos = parse_blockbook_utxos(raw);
-      const totalSat = utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n);
-      const piv = format_sat_to_piv(totalSat);
+      // Push the parsed UTXO set into the wallet so it owns the canonical
+      // view. Subsequent transparentBalanceSat() / utxos() reads come back
+      // straight from the kit, no recomputation in JS.
+      const parsed = parseBlockbookUtxos(raw);
+      wallet.setUtxos(parsed);
+
+      const totalSat = wallet.transparentBalanceSat();
+      const piv = formatSatToPiv(totalSat);
+      const n = parsed.utxos.length;
 
       $('balance-result').innerHTML =
         `<span class="status-ok">${piv} PIV</span> ` +
-        `<span class="muted">(${utxos.length} UTXO${utxos.length === 1 ? '' : 's'})</span>`;
+        `<span class="muted">(${n} UTXO${n === 1 ? '' : 's'})</span>`;
+
+      renderState(wallet);
     } catch (err) {
       $('balance-result').innerHTML =
         `<span class="status-err">Fetch failed: ${err.message}</span>`;
@@ -121,7 +127,7 @@ async function main() {
       // batches would truncate the last block of each batch (its header is
       // counted but subsequent tx packets aren't read before the cap-exit),
       // silently losing cmus and corrupting every subsequent witness position.
-      const startBlock = wallet.last_block + 1;
+      const startBlock = wallet.lastBlock() + 1;
       const resp = await fetch(
         `${RPC}/getshielddata?startBlock=${startBlock}&format=compact`
       );
@@ -131,41 +137,26 @@ async function main() {
       // Parse the whole stream up front. 500k cap is overkill for typical
       // sync ranges but cheap to own a generous ceiling.
       const allBlocks =
-        bytes.length === 0 ? [] : parse_shield_stream(bytes, 500_000);
+        bytes.length === 0 ? { blocks: [] } : parseShieldStream(bytes, 500_000);
 
       let totalBlocks = 0;
 
-      for (let i = 0; i < allBlocks.length; i += SHIELD_HANDLE_CHUNK) {
-        const blocks = allBlocks.slice(i, i + SHIELD_HANDLE_CHUNK);
+      for (let i = 0; i < allBlocks.blocks.length; i += SHIELD_HANDLE_CHUNK) {
+        const chunk = { blocks: allBlocks.blocks.slice(i, i + SHIELD_HANDLE_CHUNK) };
 
-        const result = handle_blocks(
-          wallet.commitment_tree,
-          blocks,
-          wallet.extfvk,
-          wallet.unspent_notes
-        );
+        // applyBlocks mutates the wallet in place: advances commitment tree,
+        // pushes any newly-decrypted notes, AND auto-removes own notes whose
+        // nullifiers landed in this batch. No follow-up finalize call needed.
+        wallet.applyBlocks(chunk);
 
-        const spent = new Set(result.nullifiers);
-        const notes = [...result.updated_notes, ...result.new_notes]
-          .filter((n) => !spent.has(n.nullifier));
-
-        wallet = {
-          ...wallet,
-          commitment_tree: result.commitment_tree,
-          unspent_notes: notes,
-          last_block: blocks[blocks.length - 1].height,
-        };
-
-        totalBlocks += blocks.length;
+        totalBlocks += chunk.blocks.length;
         $('shield-result').innerHTML =
-          `<span class="muted">Synced ${totalBlocks} / ${allBlocks.length} blocks (now at ${wallet.last_block})…</span>`;
+          `<span class="muted">Synced ${totalBlocks} / ${allBlocks.blocks.length} blocks (now at ${wallet.lastBlock()})…</span>`;
       }
 
-      // Use the kit's own get_balance so we're not guessing the JSON shape
-      // of a Sapling note.
-      const balanceSat = wallet_shield_balance_sat(wallet);
-      const piv = format_sat_to_piv(balanceSat);
-      const n = wallet.unspent_notes.length;
+      const balanceSat = wallet.shieldBalanceSat();
+      const piv = formatSatToPiv(balanceSat);
+      const n = wallet.notes().notes.length;
       $('shield-result').innerHTML =
         `<span class="status-ok">${piv} PIV</span> ` +
         `<span class="muted">(${n} note${n === 1 ? '' : 's'}, synced ${totalBlocks} block${totalBlocks === 1 ? '' : 's'})</span>`;
@@ -179,12 +170,21 @@ async function main() {
     }
   };
 
+  // The encrypt/decrypt pair demonstrates the round-trip a real web wallet
+  // runs before writing to localStorage. The plaintext seed/mnemonic never
+  // leaves WASM memory in encrypted form — the JSON returned by
+  // toSerializedEncrypted() is safe to persist anywhere.
   $('encrypt').onclick = async () => {
     if (!wallet) return;
     const pass = $('passphrase').value;
     if (!pass) { alert('Enter a passphrase.'); return; }
     const key = await passphraseToKey(pass);
-    wallet = encrypt_wallet(wallet, key);
+    const encrypted = wallet.toSerializedEncrypted(key);
+    // Replace the live wallet with one reconstructed from the ciphertext —
+    // it'll come back in the LOCKED state. JS now only holds the encrypted
+    // JSON, mirroring the persist→reload cycle a real wallet would run.
+    wallet.free();
+    wallet = Wallet.fromSerialized(encrypted);
     renderState(wallet);
   };
 
@@ -194,7 +194,7 @@ async function main() {
     if (!pass) { alert('Enter a passphrase.'); return; }
     const key = await passphraseToKey(pass);
     try {
-      wallet = decrypt_wallet(wallet, key);
+      wallet.unlock(key);
       renderState(wallet);
     } catch (err) {
       alert(`Decrypt failed: ${err.message || err}`);

@@ -1,6 +1,7 @@
 # PIVX Wallet Kit
 
 [![CI](https://github.com/PIVX-Labs/pivx-wallet-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/PIVX-Labs/pivx-wallet-kit/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@pivx-labs/pivx-wallet-kit?color=cb3837&logo=npm)](https://www.npmjs.com/package/@pivx-labs/pivx-wallet-kit)
 
 Pure-Rust wallet primitives for [PIVX](https://pivx.org), with first-class Sapling shield support.
 
@@ -23,7 +24,7 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
         │
         ├── native → pivx-agent-kit (CLI + MCP server, HTTP, disk)
         │
-        └── WASM   → embeddable web wallets
+        └── WASM   → embeddable web wallets (npm @pivx-labs/pivx-wallet-kit)
 ```
 
 ## Modules
@@ -34,18 +35,16 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 | `amount`                        | PIV amount parsing / formatting (exact integer, no float)                  |
 | `checkpoints`                   | Embedded mainnet checkpoint data for fast initial sync                     |
 | `keys`                          | BIP32/BIP44 derivation, Sapling ZIP32 keys, transparent address encoding   |
+| `messages`                      | PIVX Core-compatible message signing / verification                        |
 | `fees`                          | Component-based fee estimation for v3 and raw v1 transactions              |
 | `wallet`                        | In-memory `WalletData`, (de)serialization, symmetric secret encryption, Blockbook UTXO parser |
 | `sync`                          | Pure shield stream parser — bytes → block batches                          |
 | `sapling::sync`                 | `handle_blocks`: decrypt notes, advance tree, extract nullifiers           |
 | `sapling::tree`                 | Commitment tree root extraction and empty-tree helpers                     |
 | `sapling::prover`               | SHA256-verified proving parameter loader (consumer supplies bytes)         |
-| `sapling::builder`              | Shield → anything transaction builder                                      |
+| `sapling::builder`              | Shield → anything transaction builder (`select_shield_notes` + `create_shield_transaction`) |
 | `transparent::builder`          | `create_shielding_transaction` (t → shield) + `create_raw_transparent_transaction` (canonical entry — no prover needed for transparent dests) |
-| `transparent::tx`               | Low-level varint helpers                                                   |
-| `transparent::utxo`             | `Utxo` alias                                                               |
-| `simd::hex`                     | SIMD-accelerated hex encoding (NEON/AVX2/SSE2/scalar)                      |
-| `wasm` *(wasm32 only)*          | `#[wasm_bindgen]` exports + process-global Sapling prover cell             |
+| `wasm` *(wasm32 only)*          | Class-style `Wallet` / `SaplingParams` / `Mnemonic` / `Fee` API for JS consumers |
 
 ## Building
 
@@ -53,14 +52,14 @@ pivx-wallet-kit (pure Rust, cdylib + rlib)
 # Native (release)
 cargo build --release
 
-# WASM (wasm-pack)
-wasm-pack build --release --target web
+# WASM (wasm-pack), bundler target for npm
+wasm-pack build --release --target bundler --scope pivx-labs
 
-# Tests (includes real mainnet tx fixtures in tests/fixtures/)
+# Tests (53 total: 14 unit + 39 integration with real mainnet tx fixtures)
 cargo test
 ```
 
-The native `rlib` is what downstream Rust consumers (e.g. `pivx-agent-kit`) depend on. The `wasm32-unknown-unknown` `cdylib` is the target for web wallets.
+The native `rlib` is what downstream Rust consumers (e.g. `pivx-agent-kit`) depend on. The `wasm32-unknown-unknown` `cdylib` is the target for web wallets, distributed via npm as [`@pivx-labs/pivx-wallet-kit`](https://www.npmjs.com/package/@pivx-labs/pivx-wallet-kit).
 
 ## How to use
 
@@ -73,68 +72,103 @@ Add the kit to your `Cargo.toml`:
 pivx-wallet-kit = { git = "https://github.com/PIVX-Labs/pivx-wallet-kit" }
 ```
 
-Then:
-
 ```rust
-use pivx_wallet_kit::{wallet, sapling::builder, sapling::prover};
+use pivx_wallet_kit::{wallet, sapling, transparent, keys};
 
 // Import from mnemonic — consumer fetches current height from its RPC source.
 let current_height = fetch_from_rpc();
 let mut w = wallet::import_wallet(&mnemonic, current_height)?;
 
 // Derive addresses (no prover needed):
-let shield      = pivx_wallet_kit::keys::get_default_address(&w.extfvk)?;
-let transparent = pivx_wallet_kit::keys::get_transparent_address(&w.get_mnemonic().to_string())?;
+let shield      = keys::get_default_address(&w.extfvk)?;
+let transparent = w.get_transparent_address()?;
+
+// Sign an arbitrary message with the transparent key (PIVX Core-compatible).
+let bip39_seed = w.get_bip39_seed()?;
+let (_, _, privkey) = keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 0)?;
+let signature = pivx_wallet_kit::messages::sign_message(&privkey, "hello")?;
 
 // Build a pure transparent send (still no prover needed):
-let tx = pivx_wallet_kit::transparent::builder::create_raw_transparent_transaction(
-    &mut w, &w.get_bip39_seed(), &to_t_addr, amount_sat,
+let tx = transparent::builder::create_raw_transparent_transaction(
+    &mut w, &bip39_seed, &to_t_addr, amount_sat,
     0, None, // block_height / prover only used when destination is shield
 )?;
 
 // For anything touching Sapling, load the proving parameters once:
-let prover = prover::verify_and_load_params(&output_bytes, &spend_bytes)?;
+let prover = sapling::prover::verify_and_load_params(&output_bytes, &spend_bytes)?;
 
 // Build a shield transaction — pure function, no I/O.
-let tx = builder::create_shield_transaction(
-    &mut w, to_address, amount, memo, block_height, &prover,
+let tx = sapling::builder::create_shield_transaction(
+    &mut w, &to_address, amount, &memo, block_height, &prover,
 )?;
 
 // Consumer broadcasts `tx.txhex` via whatever transport it chooses.
 ```
 
-### Browser (WASM)
+### Browser (npm)
 
 ```bash
-wasm-pack build --release --target web
+npm install @pivx-labs/pivx-wallet-kit
 ```
 
-produces a complete ES-module NPM package at `pkg/`. Import it like any other module:
+The package exports a class-style API. The seed and mnemonic stay on the WASM heap — JS only ever sees handles and serialized JSON.
 
 ```js
 import init, {
-  generate_mnemonic, import_wallet,
-  derive_shield_address, derive_transparent_address,
-  encrypt_wallet, decrypt_wallet,
-  parse_blockbook_utxos, format_sat_to_piv,
-} from './pkg/pivx_wallet_kit.js';
+  Wallet,
+  SaplingParams,
+  Mnemonic,
+  Fee,
+  parseBlockbookUtxos,
+  parseShieldStream,
+  formatSatToPiv,
+} from '@pivx-labs/pivx-wallet-kit';
 
 await init();
 
-const mnemonic = generate_mnemonic();
-const wallet   = import_wallet(mnemonic, 0);
-const shield   = derive_shield_address(wallet.extfvk);
-const transparent = derive_transparent_address(mnemonic);
+// Create or import a wallet. `currentHeight` picks the latest embedded
+// checkpoint for fast initial sync.
+const phrase = Mnemonic.generate(12);
+const wallet = Wallet.fromMnemonic(phrase, currentHeight);
 
-// Before persisting the wallet, encrypt it with a key the consumer supplies:
-const encrypted = encrypt_wallet(wallet, someKey32Bytes);
+const shield      = wallet.shieldAddress();
+const transparent = wallet.transparentAddress();
+
+// Sync transparent UTXOs from any Blockbook explorer.
+const raw = await fetch(`/api/v2/utxo/${transparent}`).then(r => r.json());
+wallet.setUtxos(parseBlockbookUtxos(raw));
+const transparentSat = wallet.transparentBalanceSat();
+
+// Sync shield blocks from a PIVX Core compact-stream RPC.
+const bytes = new Uint8Array(await (await fetch(streamURL)).arrayBuffer());
+const blocks = parseShieldStream(bytes);
+wallet.applyBlocks(blocks);
+const shieldSat = wallet.shieldBalanceSat();
+
+// Build a transparent → transparent tx (no prover required).
+const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
+
+// Build a shield-source tx (load proving params once per session).
+const params = new SaplingParams(outputParamsBytes, spendParamsBytes);
+const shieldTx = wallet.sendShield({
+  to_address: shieldAddress,
+  amount_sat: 50_000n,
+  memo: '',
+  block_height: chainTip,
+}, params);
+
+// Consumer broadcasts `shieldTx.txhex` via whatever transport it chooses.
+
+// Encrypt before persisting to localStorage / IndexedDB:
+const encrypted = wallet.toSerializedEncrypted(passphraseDerivedKey32Bytes);
+localStorage.setItem('wallet', encrypted);
 ```
 
-**See [`examples/web-wallet/`](examples/web-wallet/) for a full runnable demo** — one HTML file + ~100 lines of JS, hits a real PIVX explorer for transparent balance, and demonstrates the encrypt/decrypt round-trip a web wallet would run before writing to `localStorage`.
+**See [`examples/web-wallet/`](examples/web-wallet/) for a full runnable demo** — one HTML file + ~200 lines of JS, hits a real PIVX explorer for transparent balance, runs a real shield sync from mainnet, and demonstrates the encrypt → reload → unlock cycle a web wallet would run before writing to `localStorage`.
 
 ## Status
 
-v0.1.0 — extraction from `pivx-agent-kit` complete. 36 integration tests passing against real PIVX mainnet transactions; all four tx directions (T↔T, T↔S, S↔T, S↔S) verified end-to-end on mainnet.
+**v0.2.0** — class-style WASM API, full audit pass (3 rounds), end-to-end mainnet verification across all four send paths (T↔T, T↔S, S↔T, S↔S). Used in production by [`pivx-agent-kit`](https://github.com/PIVX-Labs/pivx-agent-kit) and [`pivx-tasks`](https://github.com/PIVX-Labs/pivx-tasks).
 
 ## License
 
