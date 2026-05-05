@@ -28,6 +28,7 @@ use std::str::FromStr;
 /// the notes should be spent. `fee` is exactly what the builder will
 /// charge given the chosen `(transparent_outs, sapling_outs)` shape.
 /// `total` is the sum of selected note values (>= amount + fee).
+#[derive(Debug, Clone)]
 pub struct ShieldSelection {
     pub indexes: Vec<usize>,
     pub fee: u64,
@@ -244,4 +245,114 @@ pub use crate::sapling::sync::DEPTH as COMMITMENT_TREE_DEPTH;
 pub fn read_tree_hex(tree_hex: &str) -> Result<CommitmentTree<Node, { DEPTH }>, Box<dyn Error>> {
     let bytes = crate::simd::hex::hex_string_to_bytes(tree_hex);
     Ok(pivx_primitives::merkle_tree::read_commitment_tree(Cursor::new(bytes))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wallet::SerializedNote;
+
+    /// Build a SerializedNote whose JSON `note` field carries the given
+    /// `value`. The other fields are placeholders — `select_shield_notes`
+    /// only reads `note["value"]` and `memo`, so this is sufficient.
+    fn note(value: u64, memo: Option<&str>) -> SerializedNote {
+        SerializedNote {
+            note: serde_json::json!({ "value": value }),
+            witness: String::new(),
+            nullifier: String::new(),
+            memo: memo.map(|s| s.to_string()),
+            height: 0,
+        }
+    }
+
+    #[test]
+    fn empty_notes_returns_error() {
+        let result = select_shield_notes(&[], 100, 0, 2);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("insufficient"), "unexpected error: {}", msg);
+    }
+
+    #[test]
+    fn insufficient_balance_returns_error() {
+        let notes = vec![note(50, None), note(30, None)];
+        // 80 sat available, requesting 1000 — fee ~2 KB at 1000 sat/byte
+        // dwarfs balance regardless of selection.
+        let result = select_shield_notes(&notes, 1000, 0, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sort_order_non_memo_first_then_ascending() {
+        // Mix of memo'd and non-memo'd notes at varying values. The
+        // selection should walk non-memo notes ascending, then memo'd
+        // notes ascending. Use big-enough notes that a single one
+        // covers the send so we can pin the *first* selected index.
+        let notes = vec![
+            note(5_000_000, Some("hello")), // 0: memo'd, mid value
+            note(10_000_000, None),         // 1: no memo, large
+            note(3_000_000, None),          // 2: no memo, small  ← should win
+            note(6_000_000, Some("hi")),    // 3: memo'd, large
+        ];
+        // Need amount + fee covered by a single note. Fee for (0, 0, 1, 2)
+        // = 1000 * (2*948 + 1*384 + 100) = 2_380_000. So 3M will cover
+        // amount=500_000 + fee=2_380_000.
+        let sel = select_shield_notes(&notes, 500_000, 0, 2).unwrap();
+        assert_eq!(sel.indexes, vec![2], "expected to pick smallest non-memo note first");
+    }
+
+    #[test]
+    fn selection_walks_until_total_covers_amount_plus_fee() {
+        // Several non-memo notes; selection should accumulate inputs
+        // until total >= amount + fee.
+        //
+        // Fee for (0,0,n,2) = 1000 * (2*948 + n*384 + 100)
+        //                    = 1_996_000 + 384_000 * n
+        //
+        // amount = 100_000, notes 4 × 2M = 8M total:
+        //   n=1: total=2M, need=100k + 2_380k = 2_480k → fails
+        //   n=2: total=4M, need=100k + 2_764k = 2_864k → ok
+        let notes = vec![
+            note(2_000_000, None),
+            note(2_000_000, None),
+            note(2_000_000, None),
+            note(2_000_000, None),
+        ];
+        let sel = select_shield_notes(&notes, 100_000, 0, 2).unwrap();
+        assert_eq!(sel.indexes.len(), 2);
+        assert!(sel.total >= 100_000 + sel.fee);
+    }
+
+    #[test]
+    fn fee_matches_estimate_fee_for_selection_shape() {
+        let notes = vec![note(10_000_000, None), note(5_000_000, None)];
+        // (t_in=0, t_out=0, s_in=1, s_out=2)
+        let sel = select_shield_notes(&notes, 1_000_000, 0, 2).unwrap();
+        let expected = crate::fees::estimate_fee(0, 0, sel.indexes.len() as u64, 2);
+        assert_eq!(sel.fee, expected, "fee must match estimate_fee for the chosen shape");
+    }
+
+    #[test]
+    fn shape_change_changes_fee() {
+        // Same notes, different destination shape: shield→transparent
+        // adds 1 transparent output. Fee should differ by exactly
+        // 34_000 sat (= 1 t-out × 34 bytes × 1000 sat/byte).
+        let notes = vec![note(10_000_000, None)];
+        let to_shield = select_shield_notes(&notes, 100_000, 0, 2).unwrap();
+        let to_transparent = select_shield_notes(&notes, 100_000, 1, 2).unwrap();
+        assert_eq!(to_transparent.fee - to_shield.fee, 34_000);
+    }
+
+    #[test]
+    fn missing_value_field_propagates_error() {
+        let bad = SerializedNote {
+            note: serde_json::json!({ "not_value": 100 }),
+            witness: String::new(),
+            nullifier: String::new(),
+            memo: None,
+            height: 0,
+        };
+        let err = select_shield_notes(&[bad], 1, 0, 2).unwrap_err();
+        assert!(err.to_string().contains("'value'"), "unexpected error: {}", err);
+    }
 }

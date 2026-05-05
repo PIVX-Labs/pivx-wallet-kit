@@ -131,10 +131,11 @@ impl Fee {
 // SaplingParams class
 // ---------------------------------------------------------------------------
 
-/// Loaded Groth16 proving parameters. Construct once (after sourcing
-/// the bytes from cache or a CDN), then pass into `Wallet.sendShield`
-/// / `Wallet.sendTransparent` as needed. No global state — different
-/// `SaplingParams` instances can coexist in the same process.
+/// Loaded Groth16 proving parameters. Construct **once** per session
+/// (after sourcing the bytes from cache or a CDN), then pass into
+/// `Wallet.sendShield` / `Wallet.sendTransparent` as needed. Each
+/// instance carries the full proving keys (~50MB) — do NOT load
+/// multiple instances in parallel.
 #[wasm_bindgen]
 pub struct SaplingParams {
     inner: prover::SaplingProver,
@@ -158,7 +159,8 @@ impl SaplingParams {
 
 /// The kit's primary handle on a wallet. Owns the wallet state +
 /// secret material; mutations are in place; serialization is
-/// explicit (`toSerialized` / `toSerializedEncrypted`).
+/// explicit (`toSerializedEncrypted` for production;
+/// `toSerializedPlaintext` for debug only).
 ///
 /// LOCKED state: a wallet loaded from `fromSerialized` of an
 /// encrypted blob has its seed + mnemonic in ciphertext. Methods that
@@ -190,7 +192,7 @@ impl Wallet {
         Ok(Wallet { inner, locked: false })
     }
 
-    /// Restore from JSON produced by `toSerialized` /
+    /// Restore from JSON produced by `toSerializedPlaintext` /
     /// `toSerializedEncrypted`. Returns a wallet in the LOCKED state
     /// if the JSON was encrypted; call `unlock(key)` next.
     #[wasm_bindgen(js_name = fromSerialized)]
@@ -205,10 +207,17 @@ impl Wallet {
 
     // ─── Persistence ────────────────────────────────────────────
 
-    /// Plaintext JSON. Use `toSerializedEncrypted` for production
-    /// persistence — this method is for testnet / debug only.
-    #[wasm_bindgen(js_name = toSerialized)]
-    pub fn to_serialized(&self) -> Result<String, JsError> {
+    /// **DANGER: PLAINTEXT.** Returns a JSON string containing the
+    /// wallet's seed and mnemonic in cleartext. Only useful for
+    /// testnet / debug / cross-implementation testing — NEVER persist
+    /// the output of this method to disk or send it over the wire.
+    /// Use [`Wallet::toSerializedEncrypted`] for production persistence.
+    ///
+    /// The intentionally-loud name is the footgun guard: any code
+    /// review that sees `toSerializedPlaintext` should immediately
+    /// trigger "wait, why?".
+    #[wasm_bindgen(js_name = toSerializedPlaintext)]
+    pub fn to_serialized_plaintext(&self) -> Result<String, JsError> {
         serde_json::to_string(&self.inner).map_err(js_err)
     }
 
