@@ -147,12 +147,9 @@ wallet.applyBlocks(blocks);
 const shieldSat = wallet.shieldBalanceSat();
 
 // Build a transparent → transparent tx (no prover required).
-// Direct `u64` wasm-bindgen args take BigInt:
 const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
 
 // Build a shield-source tx (load proving params once per session).
-// `SendShieldOpts` is a tsify struct — its `u64` fields cross via
-// serde_wasm_bindgen and take a regular number, NOT BigInt.
 const params = new SaplingParams(outputParamsBytes, spendParamsBytes);
 const shieldTx = wallet.sendShield({
   to_address: shieldAddress,
