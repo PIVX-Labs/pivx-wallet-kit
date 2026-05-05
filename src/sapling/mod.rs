@@ -5,9 +5,6 @@
 //! Zcash (v4).
 
 pub mod builder;
-pub mod keys;
-pub mod notes;
 pub mod prover;
 pub mod sync;
 pub mod tree;
-pub mod tx;

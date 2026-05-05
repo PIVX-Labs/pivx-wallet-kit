@@ -447,11 +447,18 @@ fn parse_real_shield_tx_v3() {
 // Shield block processing with real fixtures
 // ---------------------------------------------------------------------------
 
-/// Feeding the real shield tx through `handle_blocks` with a *random* viewing
-/// key should: (1) not panic, (2) produce no decrypted notes, (3) extract the
-/// spent nullifier, (4) advance the commitment tree.
+/// Feeding the real shield tx through `handle_blocks` with an *unrelated*
+/// viewing key (random throwaway mnemonic, guaranteed not the real recipient)
+/// should: (1) not panic, (2) produce no decrypted notes, (3) still extract
+/// the spent nullifier, and (4) advance the commitment tree by exactly the
+/// number of output commitments in the tx (2 for this fixture).
 #[test]
-fn handle_blocks_processes_real_shield_tx_without_key() {
+fn handle_blocks_with_unrelated_key_advances_tree_and_extracts_nullifier() {
+    use incrementalmerkletree::frontier::CommitmentTree;
+    use pivx_primitives::merkle_tree::read_commitment_tree;
+    use ::sapling::Node;
+    use std::io::Cursor;
+
     let tx_bytes = decode_fixture(TX_SHIELD_HEX);
 
     // Derive a random extfvk from a throwaway mnemonic — guaranteed not to be
@@ -469,16 +476,25 @@ fn handle_blocks_processes_real_shield_tx_without_key() {
     let result =
         sapling::sync::handle_blocks(tree_hex, vec![block], &random.extfvk, &[]).unwrap();
 
-    // No decryption because the key is random.
+    // No decryption because the key is unrelated.
     assert!(result.new_notes.is_empty());
     // But the spend nullifier should have been surfaced.
     assert_eq!(result.nullifiers.len(), 1);
-    // The tree should have advanced (no longer equal to the starting root).
-    let root_before = sapling::tree::get_sapling_root(tree_hex).unwrap();
-    let root_after = sapling::tree::get_sapling_root(&result.commitment_tree).unwrap();
-    assert_ne!(
-        root_before, root_after,
-        "tree root should advance after appending 2 output commitments"
+
+    // Tree must advance by exactly 2 leaves — the tx has 2 shielded outputs.
+    let parse_tree = |hex: &str| -> u64 {
+        let bytes = simd::hex::hex_string_to_bytes(hex);
+        let tree: CommitmentTree<Node, 32> = read_commitment_tree(Cursor::new(bytes)).unwrap();
+        tree.size() as u64
+    };
+    let size_before = parse_tree(tree_hex);
+    let size_after = parse_tree(&result.commitment_tree);
+    assert_eq!(
+        size_after - size_before,
+        2,
+        "expected 2 output commitments appended to the tree (size before {}, after {})",
+        size_before,
+        size_after,
     );
 }
 

@@ -12,7 +12,7 @@ use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::error::Error;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// A serializable spendable Sapling note (mirrors pivx-shield-rust's JSSpendableNote).
 #[derive(Clone, Serialize, Deserialize)]
@@ -149,10 +149,19 @@ impl WalletData {
     }
 
     /// Get the full 64-byte BIP39 seed (needed for transparent key derivation).
-    pub fn get_bip39_seed(&self) -> Vec<u8> {
+    ///
+    /// Returns `Err` if `self.mnemonic` is not a valid BIP39 phrase. The
+    /// stored mnemonic is *expected* to be valid post-`decrypt_secrets`,
+    /// but this method is safe to call before decryption (it'll just
+    /// fail) — useful for early lifecycle paths where the wallet may
+    /// still be sealed.
+    ///
+    /// The returned bytes are wrapped in [`Zeroizing`] so they wipe
+    /// when the caller drops them.
+    pub fn get_bip39_seed(&self) -> Result<Zeroizing<Vec<u8>>, Box<dyn Error>> {
         let mnemonic = bip39::Mnemonic::parse_normalized(&self.mnemonic)
-            .expect("Stored mnemonic should always be valid");
-        mnemonic.to_seed("").to_vec()
+            .map_err(|e| format!("Invalid stored mnemonic: {e}"))?;
+        Ok(Zeroizing::new(mnemonic.to_seed("").to_vec()))
     }
 
     /// Mark shield notes as spent by removing those whose nullifiers match.

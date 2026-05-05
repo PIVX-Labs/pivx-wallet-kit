@@ -12,9 +12,9 @@ use std::io::Cursor;
 pub fn get_sapling_root(tree_hex: &str) -> Result<String, Box<dyn Error>> {
     let tree: CommitmentTree<Node, { DEPTH }> =
         read_commitment_tree(Cursor::new(crate::simd::hex::hex_string_to_bytes(tree_hex)))?;
-    let root_bytes = tree.root().to_bytes();
-    let reversed: Vec<u8> = root_bytes.iter().rev().cloned().collect();
-    Ok(crate::simd::hex::bytes_to_hex_string(&reversed))
+    let mut root_bytes = tree.root().to_bytes();
+    root_bytes.reverse();
+    Ok(crate::simd::hex::bytes_to_hex_string(&root_bytes))
 }
 
 /// Compare a wallet's local sapling root against a network-reported one.

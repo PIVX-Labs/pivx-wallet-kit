@@ -16,6 +16,7 @@ use zcash_keys::encoding;
 use bip32::{DerivationPath, XPrv};
 use sha2::{Digest, Sha256};
 use ripemd::Ripemd160;
+use zeroize::Zeroizing;
 
 /// Shield or transparent address (decoded).
 pub enum GenericAddress {
@@ -96,11 +97,18 @@ pub fn encode_payment_address(addr: &PaymentAddress) -> String {
 /// Path: `m/44'/PIVX_COIN_TYPE'/0'/change/index`.
 /// Returns `(base58 address, compressed pubkey [33], private key [32])`.
 #[allow(clippy::type_complexity)] // Tuple return is a documented stable shape; refactor tracked as an ergonomics concern
+/// Derive a BIP44 transparent key triple at `m/44'/119'/0'/{change}/{index}`.
+///
+/// The privkey is returned wrapped in [`Zeroizing`] — it'll wipe its 32-byte
+/// buffer when the caller drops it. Callers that need to copy the bytes into
+/// another secret-bearing struct should do so via the deref (`&*privkey` or
+/// `privkey.as_slice()`); copies into non-zeroizing containers re-introduce
+/// the leak. Pubkey + address are public material and not wrapped.
 pub fn transparent_key_from_bip39_seed(
     bip39_seed: &[u8],
     change: u32,
     index: u32,
-) -> Result<(String, Vec<u8>, Vec<u8>), Box<dyn Error>> {
+) -> Result<(String, Vec<u8>, Zeroizing<Vec<u8>>), Box<dyn Error>> {
     let path: DerivationPath = format!("m/44'/{}'/0'/{}/{}", PIVX_COIN_TYPE, change, index)
         .parse()
         .map_err(|e| format!("Invalid derivation path: {e}"))?;
@@ -110,7 +118,7 @@ pub fn transparent_key_from_bip39_seed(
 
     let pubkey = child.public_key();
     let pubkey_bytes = pubkey.to_bytes();
-    let privkey_bytes = child.to_bytes().to_vec();
+    let privkey_bytes = Zeroizing::new(child.to_bytes().to_vec());
 
     let address = pubkey_to_pivx_address(&pubkey_bytes);
 
