@@ -27,6 +27,17 @@ path = "examples/sign.rs"
 # instructions (memory.copy) on stable since 2024.
 wasm-opt = [
     "-O",
+    # `-O` (= -O3) optimizes for speed-with-some-size — right for a
+    # crypto kit where Groth16 proving dominates runtime cost. Do NOT
+    # downgrade to -Os/-Oz: shaving wasm size by 10% at the cost of
+    # making every shield-send 30%+ slower is a bad trade.
+    #
+    # `--strip-debug` and `--strip-producers` are not implied by -O:
+    # they drop DWARF debug info and the "produced by rustc/wasm-bindgen"
+    # metadata respectively. Together they typically shave another
+    # 5-15% off the published .wasm with zero runtime impact.
+    "--strip-debug",
+    "--strip-producers",
     "--enable-bulk-memory",
     "--enable-nontrapping-float-to-int",
     "--enable-sign-ext",
@@ -103,3 +114,7 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+# `panic = "abort"` saves ~100-300KB on wasm by removing the panic-string
+# formatting machinery and unwinding tables. wasm consumers can't catch
+# panics anyway (the runtime traps), so the behavioral cost is zero.
+panic = "abort"
