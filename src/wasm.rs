@@ -316,19 +316,25 @@ impl Wallet {
 
     /// Apply parsed shield blocks to the wallet — decrypts notes
     /// belonging to this wallet, advances the commitment tree,
-    /// extracts nullifiers (potential spends of our notes). Returns
-    /// the deltas; the wallet is also mutated in place.
+    /// extracts nullifiers (potential spends of our notes), and
+    /// removes any of our own notes that were spent in this batch.
+    /// Returns the deltas; the wallet is mutated in place.
+    ///
+    /// On error the wallet's note set is left untouched — the caller
+    /// can retry with the same or a different block batch without
+    /// reloading from disk.
     #[wasm_bindgen(js_name = applyBlocks)]
     pub fn apply_blocks(
         &mut self,
         blocks: ShieldBlocksInput,
     ) -> Result<HandleBlocksResult, JsError> {
-        // handle_blocks takes ownership of the existing notes (H6
-        // optimisation — moves the JSON values into from_serialized
-        // instead of cloning each one). std::mem::take swaps the
-        // wallet's notes out for an empty Vec; we'll repopulate
-        // from the result.
-        let existing = std::mem::take(&mut self.inner.unspent_notes);
+        // Clone instead of mem::take: if handle_blocks errors, we
+        // do not want to strand the wallet with an empty note set.
+        // The H6 zero-clone path is preserved for native consumers
+        // that can hand handle_blocks an owned Vec directly; the
+        // wasm wrapper accepts the per-note allocation cost in
+        // exchange for state-corruption safety.
+        let existing = self.inner.unspent_notes.clone();
         let result = crate::sapling::sync::handle_blocks(
             &self.inner.commitment_tree,
             blocks.blocks,
@@ -336,13 +342,16 @@ impl Wallet {
             existing,
         )
         .map_err(js_err)?;
-        // handle_blocks's `updated_notes` is the post-batch state of
-        // every existing note that survived this batch (witnesses
-        // advanced, no nullifier match). Anything spent doesn't
-        // appear there. `new_notes` is what was newly discovered.
+        // `updated_notes` is the post-batch state of existing notes
+        // (witnesses advanced); `new_notes` is what was newly
+        // discovered. handle_blocks does not filter out own notes
+        // that were spent — the nullifier list contains every spend
+        // in the batch, not just ours, so we let
+        // finalize_transaction do the matching.
         self.inner.commitment_tree = result.commitment_tree.clone();
         self.inner.unspent_notes = result.updated_notes.clone();
         self.inner.unspent_notes.extend(result.new_notes.clone());
+        self.inner.finalize_transaction(&result.nullifiers);
         Ok(result)
     }
 
@@ -362,9 +371,7 @@ impl Wallet {
         let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
         let (_addr, _pk, privkey) =
             crate::keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 0).map_err(js_err)?;
-        let mut key32 = [0u8; 32];
-        key32.copy_from_slice(&privkey);
-        crate::messages::sign_message(&key32, message).map_err(js_err)
+        crate::messages::sign_message(&privkey, message).map_err(js_err)
     }
 
     // ─── Tx building ────────────────────────────────────────────
@@ -397,8 +404,9 @@ impl Wallet {
         to_address: &str,
         amount_sat: u64,
     ) -> Result<TransparentTransactionResult, JsError> {
+        use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
         self.ensure_unlocked()?;
-        if to_address.starts_with("ps") {
+        if to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
             return Err(JsError::new(
                 "to_address is a shield address — use sendTransparentToShield instead",
             ));
@@ -426,8 +434,9 @@ impl Wallet {
         block_height: u32,
         params: &SaplingParams,
     ) -> Result<TransparentTransactionResult, JsError> {
+        use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
         self.ensure_unlocked()?;
-        if !to_address.starts_with("ps") {
+        if !to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
             return Err(JsError::new(
                 "to_address is not a shield address — use sendTransparentToTransparent instead",
             ));
@@ -446,44 +455,50 @@ impl Wallet {
 
     // ─── Fee estimation ─────────────────────────────────────────
 
-    /// Fee for `sendShield(amount)` against the current note set.
-    /// Performs the same selection the real send would; errs if
-    /// shield balance is insufficient.
+    /// Fee for `sendShield(to, amount)` against the current note set.
+    /// Calls into the same selection routine the real send uses, so the
+    /// returned fee is exactly what `sendShield` will charge against
+    /// the same note set. Errs if shield balance is insufficient.
+    ///
+    /// `to_address` decides the destination shape: shield→shield uses
+    /// `(0 t-out, 2 s-out)`; shield→transparent uses `(1 t-out, 2 s-out)`.
     #[wasm_bindgen(js_name = estimateSendShieldFee)]
-    pub fn estimate_send_shield_fee(&self, amount_sat: u64) -> Result<u64, JsError> {
-        // Match the builder's own selection: largest-first; fee is
-        // (1 sapling input × N) + 2 sapling outputs (dest + change).
-        let mut notes: Vec<u64> = self
-            .inner
-            .unspent_notes
-            .iter()
-            .filter_map(|n| n.note.get("value").and_then(|v| v.as_u64()))
-            .collect();
-        notes.sort_unstable_by(|a, b| b.cmp(a));
-        let mut total = 0u64;
-        for (i, v) in notes.iter().enumerate() {
-            total = total.saturating_add(*v);
-            let fee = crate::fees::estimate_fee(0, 0, (i + 1) as u64, 2);
-            if total >= amount_sat.saturating_add(fee) {
-                return Ok(fee);
-            }
-        }
-        Err(JsError::new(&format!(
-            "insufficient shield balance: have {} sat, need {} + fee",
-            total, amount_sat
-        )))
+    pub fn estimate_send_shield_fee(
+        &self,
+        to_address: &str,
+        amount_sat: u64,
+    ) -> Result<u64, JsError> {
+        use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
+        let dest_is_shield =
+            to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address());
+        let (t_outs, s_outs) = if dest_is_shield { (0u64, 2u64) } else { (1u64, 2u64) };
+        let selection = crate::sapling::builder::select_shield_notes(
+            &self.inner.unspent_notes,
+            amount_sat,
+            t_outs,
+            s_outs,
+        )
+        .map_err(js_err)?;
+        Ok(selection.fee)
     }
 
     /// Fee for `sendTransparent*` against the current UTXO set.
     /// Auto-routes by destination prefix (v1 P2PKH for D…, v3 for ps1…).
     /// Errs if transparent balance is insufficient.
+    ///
+    /// Uses the same fee shape the matching builder will charge:
+    /// shield destination → `create_shielding_transaction` (which
+    /// hardcodes `(n, 0, 0, 2)`); transparent destination →
+    /// `create_raw_transparent_transaction` (`(n, 2)` v1 P2PKH).
     #[wasm_bindgen(js_name = estimateSendTransparentFee)]
     pub fn estimate_send_transparent_fee(
         &self,
         to_address: &str,
         amount_sat: u64,
     ) -> Result<u64, JsError> {
-        let dest_is_shield = to_address.starts_with("ps");
+        use pivx_primitives::consensus::{MAIN_NETWORK, NetworkConstants};
+        let dest_is_shield =
+            to_address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address());
         let mut utxos: Vec<u64> =
             self.inner.unspent_utxos.iter().map(|u| u.amount).collect();
         utxos.sort_unstable_by(|a, b| b.cmp(a));
@@ -492,8 +507,13 @@ impl Wallet {
             total = total.saturating_add(*v);
             let n = (i + 1) as u64;
             let fee = if dest_is_shield {
-                // v3: N t-in, 0 t-out (change rides shield), 0 s-in, 1 s-out
-                crate::fees::estimate_fee(n, 0, 0, 1)
+                // create_shielding_transaction hardcodes 2 sapling
+                // outputs in its fee math (see transparent/builder.rs:
+                // sapling_output_count = 2). Match exactly so a
+                // follow-up `sendTransparentToShield(amount, …)` does
+                // not fail with "Insufficient public balance" because
+                // the estimator under-quoted.
+                crate::fees::estimate_fee(n, 0, 0, 2)
             } else {
                 // v1 P2PKH: N inputs, dest + change
                 crate::fees::estimate_raw_transparent_fee(n as usize, 2)

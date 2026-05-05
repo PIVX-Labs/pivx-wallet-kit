@@ -4,7 +4,7 @@ use crate::fees;
 use crate::keys::{self, GenericAddress};
 use crate::sapling::prover::SaplingProver;
 use crate::sapling::sync::DEPTH;
-use crate::wallet::WalletData;
+use crate::wallet::{SerializedNote, WalletData};
 use incrementalmerkletree::frontier::CommitmentTree;
 use pivx_primitives::consensus::{BlockHeight, Network, NetworkConstants};
 use pivx_primitives::memo::MemoBytes;
@@ -21,6 +21,73 @@ use sapling::{Anchor, Node};
 use std::error::Error;
 use std::io::Cursor;
 use std::str::FromStr;
+
+/// Result of selecting which shield notes to spend for a given send.
+///
+/// `indexes` are positions into the input `notes` slice in the order
+/// the notes should be spent. `fee` is exactly what the builder will
+/// charge given the chosen `(transparent_outs, sapling_outs)` shape.
+/// `total` is the sum of selected note values (>= amount + fee).
+pub struct ShieldSelection {
+    pub indexes: Vec<usize>,
+    pub fee: u64,
+    pub total: u64,
+}
+
+/// Pick which shield notes to spend.
+///
+/// Selection order is **non-memo first, then ascending value** —
+/// matches `create_shield_transaction`'s spend order. The estimator
+/// (`Wallet.estimateSendShieldFee`) uses the same function, so a
+/// fee returned by the estimator is the fee a follow-up
+/// `sendShield(amount, ...)` will actually charge against the same
+/// note set.
+///
+/// `transparent_outs` and `sapling_outs` are the destination shape:
+/// for shield→shield use `(0, 2)` (dest + change); for
+/// shield→transparent use `(1, 2)` (dest transparent + change shield).
+pub fn select_shield_notes(
+    notes: &[SerializedNote],
+    amount: u64,
+    transparent_outs: u64,
+    sapling_outs: u64,
+) -> Result<ShieldSelection, Box<dyn Error>> {
+    let mut indexed: Vec<(usize, u64, bool)> = notes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let value = n
+                .note
+                .get("value")
+                .and_then(|v| v.as_u64())
+                .ok_or("note JSON missing 'value' field")?;
+            let has_memo = n.memo.as_ref().is_some_and(|m| !m.is_empty());
+            Ok::<_, Box<dyn Error>>((i, value, has_memo))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    indexed.sort_by_key(|(_, value, has_memo)| (*has_memo, *value));
+
+    let mut selected = Vec::new();
+    let mut total: u64 = 0;
+    let mut fee: u64 = 0;
+    for (i, value, _) in &indexed {
+        selected.push(*i);
+        total = total.saturating_add(*value);
+        fee = fees::estimate_fee(0, transparent_outs, selected.len() as u64, sapling_outs);
+        if total >= amount.saturating_add(fee) {
+            return Ok(ShieldSelection {
+                indexes: selected,
+                fee,
+                total,
+            });
+        }
+    }
+    Err(format!(
+        "insufficient shield balance: have {} sat, need {} sat (amount) + {} sat (fee)",
+        total, amount, fee
+    )
+    .into())
+}
 
 /// Result of building a shield transaction.
 #[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
@@ -47,28 +114,38 @@ pub fn create_shield_transaction(
     let extsk = wallet.derive_extsk()?;
     let network = Network::MainNetwork;
 
-    let mut notes: Vec<(Note, String, bool)> = wallet
-        .unspent_notes
-        .iter()
-        .map(|n| {
-            let note: Note = serde_json::from_value(n.note.clone())?;
-            let has_memo = n.memo.as_ref().is_some_and(|m| !m.is_empty());
-            Ok((note, n.witness.clone(), has_memo))
-        })
-        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
-    // Spend non-memo notes first, then by ascending value.
-    notes.sort_by_key(|(note, _, has_memo)| (*has_memo, note.value().inner()));
+    let (transparent_output_count, sapling_output_count) =
+        if to_address.starts_with(network.hrp_sapling_payment_address()) {
+            (0u64, 2u64)
+        } else {
+            (1u64, 2u64)
+        };
 
-    let anchor = match notes.first() {
-        Some((_, witness_hex, _)) => {
-            let witness = read_incremental_witness::<Node, _, { DEPTH }>(Cursor::new(
-                crate::simd::hex::hex_string_to_bytes(witness_hex),
-            ))?;
-            Anchor::from_bytes(witness.root().to_bytes())
-                .into_option()
-                .unwrap_or(Anchor::empty_tree())
-        }
-        None => return Err("No spendable notes available".into()),
+    // Single source of truth for which notes to spend and what fee
+    // to charge — shared with `Wallet.estimateSendShieldFee` so the
+    // estimator and the builder never disagree.
+    let selection = select_shield_notes(
+        &wallet.unspent_notes,
+        amount,
+        transparent_output_count,
+        sapling_output_count,
+    )?;
+    let total = selection.total;
+    let fee = selection.fee;
+
+    // Anchor from the first selected note's witness.
+    let first_idx = *selection
+        .indexes
+        .first()
+        .ok_or("No spendable notes available")?;
+    let first_witness_hex = &wallet.unspent_notes[first_idx].witness;
+    let anchor = {
+        let witness = read_incremental_witness::<Node, _, { DEPTH }>(Cursor::new(
+            crate::simd::hex::hex_string_to_bytes(first_witness_hex),
+        ))?;
+        Anchor::from_bytes(witness.root().to_bytes())
+            .into_option()
+            .unwrap_or(Anchor::empty_tree())
     };
 
     let mut builder = Builder::new(
@@ -81,54 +158,17 @@ pub fn create_shield_transaction(
     );
     let transparent_signing_set = TransparentSigningSet::new();
 
-    let (transparent_output_count, sapling_output_count) =
-        if to_address.starts_with(network.hrp_sapling_payment_address()) {
-            (0u64, 2u64)
-        } else {
-            (1u64, 2u64)
-        };
-
     let dfvk = extsk.to_diversifiable_full_viewing_key();
     let fvk = dfvk.fvk().clone();
     let nk = dfvk.to_nk(Scope::External);
 
-    // Two-pass selection (M8 fix): the inner add_sapling_spend +
-    // witness-parse pair was being run for every candidate note —
-    // for a wallet with many small notes that's a lot of needless
-    // hex decode + IncrementalWitness parsing for notes we'll never
-    // spend. First pass walks values only; second pass parses
-    // witnesses and adds spends just for the selected slice.
-    let mut total = 0u64;
-    let mut sapling_input_count = 0u64;
-    let mut fee = 0u64;
-    let mut selected = 0usize;
-    for (note, _witness_hex, _has_memo) in &notes {
-        sapling_input_count += 1;
-        fee = fees::estimate_fee(
-            0,
-            transparent_output_count,
-            sapling_input_count,
-            sapling_output_count,
-        );
-        total += note.value().inner();
-        selected += 1;
-        if total >= amount + fee {
-            break;
-        }
-    }
-
-    if total < amount + fee {
-        return Err(format!(
-            "Not enough balance. Have: {} sat, need: {} sat (amount) + {} sat (fee)",
-            total, amount, fee
-        )
-        .into());
-    }
-
-    let mut nullifiers = vec![];
-    for (note, witness_hex, _) in notes.iter().take(selected) {
+    // Parse Note + IncrementalWitness only for selected notes (M8).
+    let mut nullifiers = Vec::with_capacity(selection.indexes.len());
+    for &idx in &selection.indexes {
+        let serialized = &wallet.unspent_notes[idx];
+        let note: Note = serde_json::from_value(serialized.note.clone())?;
         let witness = read_incremental_witness::<Node, _, { DEPTH }>(Cursor::new(
-            crate::simd::hex::hex_string_to_bytes(witness_hex),
+            crate::simd::hex::hex_string_to_bytes(&serialized.witness),
         ))?;
         builder
             .add_sapling_spend::<FeeRule>(

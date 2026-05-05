@@ -17,10 +17,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parsed = bip39::Mnemonic::parse_normalized(&mnemonic)?;
     let bip39_seed = parsed.to_seed("");
     let (address, _pubkey, privkey) = keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 0)?;
-    let mut key32 = [0u8; 32];
-    key32.copy_from_slice(&privkey);
 
-    let signature = messages::sign_message(&key32, &message)?;
+    let signature = messages::sign_message(&privkey, &message)?;
     println!("{} {}", address, signature);
     Ok(())
 }

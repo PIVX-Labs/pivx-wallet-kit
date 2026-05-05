@@ -63,10 +63,18 @@ fn message_hash(message: &str) -> [u8; 32] {
 
 /// Sign `message` with the given 32-byte private key.
 ///
+/// Accepts the privkey as a byte slice so callers can pass through
+/// `Zeroizing<Vec<u8>>` (or any other zeroize-on-drop wrapper) without
+/// copying into a non-zeroizing fixed-size buffer first. The slice
+/// must be exactly 32 bytes.
+///
 /// Returns a base64 signature byte-compatible with PIVX Core's
 /// `verifymessage` RPC. The recovered public key will be the compressed
 /// form (matches PIVX Core's behaviour).
-pub fn sign_message(privkey: &[u8; 32], message: &str) -> Result<String, Box<dyn Error>> {
+pub fn sign_message(privkey: &[u8], message: &str) -> Result<String, Box<dyn Error>> {
+    if privkey.len() != 32 {
+        return Err(format!("privkey must be exactly 32 bytes; got {}", privkey.len()).into());
+    }
     let secp = Secp256k1::new();
     let sk = SecretKey::from_slice(privkey).map_err(|e| format!("Invalid privkey: {e}"))?;
     let hash = message_hash(message);
@@ -138,10 +146,8 @@ mod tests {
         let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let parsed = bip39::Mnemonic::parse_normalized(mnemonic).unwrap();
         let bip39_seed = parsed.to_seed("");
-        let (address, _pubkey, privkey_vec) =
+        let (address, _pubkey, privkey) =
             keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 0).unwrap();
-        let mut privkey = [0u8; 32];
-        privkey.copy_from_slice(&privkey_vec);
 
         let message = "Hello, PIVX!";
         let sig = sign_message(&privkey, message).unwrap();
@@ -162,10 +168,8 @@ mod tests {
         let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let parsed = bip39::Mnemonic::parse_normalized(mnemonic).unwrap();
         let bip39_seed = parsed.to_seed("");
-        let (address, _pk, privkey_vec) =
+        let (address, _pk, privkey) =
             keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 0).unwrap();
-        let mut privkey = [0u8; 32];
-        privkey.copy_from_slice(&privkey_vec);
 
         // Encode privkey as PIVX mainnet WIF (compressed): 0xD4 + key + 0x01 + 4-byte SHA256d checksum, base58.
         let mut wif_payload = Vec::with_capacity(34);
