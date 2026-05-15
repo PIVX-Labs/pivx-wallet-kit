@@ -169,6 +169,8 @@ localStorage.setItem('wallet', encrypted);
 
 ## Status
 
+**v0.2.2** — adds `transparent::builder::create_raw_transparent_transaction_from_utxos` for spending from any HD-indexed address with caller-supplied UTXOs. Unblocks consumers that maintain multiple receive addresses (payment processors, hierarchical accounting). Backwards-compatible; existing callers see no API change.
+
 **v0.2.1** — adds diversifier-based shield address derivation (`shield_address_at`) for merchant use cases where one address per invoice is needed. Backwards-compatible; existing callers see no API change.
 
 **v0.2.0** — class-style WASM API, full audit pass (3 rounds), end-to-end mainnet verification across all four send paths (T↔T, T↔S, S↔T, S↔S). Used in production by [`pivx-agent-kit`](https://github.com/PIVX-Labs/pivx-agent-kit) and [`pivx-tasks`](https://github.com/PIVX-Labs/pivx-tasks).

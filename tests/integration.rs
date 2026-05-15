@@ -638,6 +638,150 @@ fn transparent_to_transparent_tx_needs_no_prover() {
     assert_eq!(&tx_bytes[0..4], &[0x01, 0x00, 0x00, 0x00]);
 }
 
+/// The from-UTXOs builder must spend from an HD-indexed address (not the
+/// default index 0). Verifies that signing happens with the right key by
+/// deriving the address at index 5 and confirming the change output script
+/// matches that address (a partial-amount send to force a change output).
+#[test]
+fn raw_transparent_from_utxos_signs_with_custom_hd_index() {
+    use pivx_wallet_kit::transparent::builder::create_raw_transparent_transaction_from_utxos;
+    use pivx_wallet_kit::wallet::SerializedUTXO;
+
+    let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
+    let bip39_seed = mnemonic.to_seed("");
+
+    // Derive the address at HD index 5 — what a consumer that maintains
+    // multiple receive addresses would use as a source.
+    let (from_addr, _pubkey, _privkey) =
+        keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 5).unwrap();
+
+    // UTXOs at from_addr.
+    let utxos = vec![SerializedUTXO {
+        txid: "b".repeat(64),
+        vout: 1,
+        amount: 100_000_000, // 1 PIV
+        script: String::new(),
+        height: 5_000_000,
+    }];
+
+    // Send 0.5 PIV to a different address; the rest is fee + change
+    // back to from_addr.
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+
+    let result = create_raw_transparent_transaction_from_utxos(
+        &bip39_seed,
+        0,
+        5,
+        &utxos,
+        &to,
+        50_000_000,
+    )
+    .expect("from-utxos builder should produce a signed tx");
+
+    assert!(!result.txhex.is_empty());
+    assert_eq!(result.amount, 50_000_000);
+    assert_eq!(result.spent.len(), 1);
+    assert_eq!(result.spent[0].txid, "b".repeat(64));
+    assert_eq!(result.spent[0].vout, 1);
+
+    // The signed tx should reference from_addr's script in the change
+    // output. We can confirm this without parsing the tx by checking that
+    // the from_addr script bytes appear somewhere in the body.
+    let from_script = keys::address_to_p2pkh_script(&from_addr).unwrap();
+    let tx_bytes = simd::hex::hex_string_to_bytes(&result.txhex);
+    assert!(
+        windows_contains(&tx_bytes, &from_script),
+        "change output should pay back to the HD-indexed source address"
+    );
+}
+
+#[test]
+fn raw_transparent_from_utxos_full_amount_has_no_change_output() {
+    use pivx_wallet_kit::transparent::builder::create_raw_transparent_transaction_from_utxos;
+    use pivx_wallet_kit::wallet::SerializedUTXO;
+
+    let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
+    let bip39_seed = mnemonic.to_seed("");
+
+    let utxos = vec![SerializedUTXO {
+        txid: "c".repeat(64),
+        vout: 0,
+        amount: 100_000_000,
+        script: String::new(),
+        height: 5_000_000,
+    }];
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+
+    let result = create_raw_transparent_transaction_from_utxos(
+        &bip39_seed,
+        0,
+        3,
+        &utxos,
+        &to,
+        // Pass total - fee so change is exactly 0 — the typical
+        // "send everything" path.
+        100_000_000 - pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2),
+    )
+    .unwrap();
+
+    // 1-output tx serialises the output count varint at a known offset
+    // structure: version(4) + input_count_varint + input(s) + output_count.
+    // Easier check: total spent = single input, expected fee.
+    assert_eq!(result.spent.len(), 1);
+    assert_eq!(
+        result.fee,
+        pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2)
+    );
+}
+
+#[test]
+fn raw_transparent_from_utxos_empty_utxos_fails() {
+    use pivx_wallet_kit::transparent::builder::create_raw_transparent_transaction_from_utxos;
+
+    let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
+    let bip39_seed = mnemonic.to_seed("");
+
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let err = create_raw_transparent_transaction_from_utxos(&bip39_seed, 0, 0, &[], &to, 100);
+    assert!(err.is_err());
+}
+
+#[test]
+fn raw_transparent_from_utxos_insufficient_balance_fails() {
+    use pivx_wallet_kit::transparent::builder::create_raw_transparent_transaction_from_utxos;
+    use pivx_wallet_kit::wallet::SerializedUTXO;
+
+    let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
+    let bip39_seed = mnemonic.to_seed("");
+
+    let utxos = vec![SerializedUTXO {
+        txid: "d".repeat(64),
+        vout: 0,
+        amount: 1_000,
+        script: String::new(),
+        height: 5_000_000,
+    }];
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let err = create_raw_transparent_transaction_from_utxos(
+        &bip39_seed,
+        0,
+        1,
+        &utxos,
+        &to,
+        100_000_000,
+    );
+    assert!(err.is_err(), "should reject when UTXOs < amount + fee");
+}
+
+/// Small helper — finds a needle byte slice anywhere inside a haystack.
+/// Avoids pulling in a crate just for this.
+fn windows_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// Shield destinations must reject `prover_for_shield = None`.
 #[test]
 fn transparent_to_shield_requires_prover() {

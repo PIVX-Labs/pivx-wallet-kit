@@ -346,6 +346,132 @@ pub fn create_raw_transparent_transaction(
     })
 }
 
+/// Build and sign a v1 P2PKH transparent transaction from a specific HD
+/// slot, spending a caller-supplied set of UTXOs.
+///
+/// Distinct from [`create_raw_transparent_transaction`] in two ways:
+///
+///  1. **Custom HD index.** Signs with the key at
+///     `m/44'/119'/0'/from_change/from_index` rather than the wallet's
+///     default `(0, 0)`. Lets callers spend from any HD-derived address
+///     — useful for any consumer that maintains multiple receive
+///     addresses (payment processors, hierarchical-deterministic
+///     accounting, etc.).
+///
+///  2. **Caller-supplied UTXOs.** Doesn't read `WalletData` at all.
+///     The caller hands in exactly the UTXOs they want to spend; the
+///     function applies no selection on top.
+///
+/// Single recipient, single source. Any leftover (`total - amount -
+/// fee`) becomes a change output back to the *source* address (where
+/// the funds came from). Pass `amount = total - fee` to get exactly
+/// one output with no change.
+///
+/// Returns the same `TransparentTransactionResult` shape as the wallet-
+/// state-aware sibling, including the `spent` list so the caller can
+/// reconcile its own UTXO bookkeeping.
+pub fn create_raw_transparent_transaction_from_utxos(
+    bip39_seed: &[u8],
+    from_change: u32,
+    from_index: u32,
+    utxos: &[SerializedUTXO],
+    to_address: &str,
+    amount: u64,
+) -> Result<TransparentTransactionResult, Box<dyn Error>> {
+    if utxos.is_empty() {
+        return Err("No UTXOs provided".into());
+    }
+
+    let (own_address, pubkey_bytes, privkey_bytes) =
+        keys::transparent_key_from_bip39_seed(bip39_seed, from_change, from_index)?;
+
+    let to_script = keys::address_to_p2pkh_script(to_address)?;
+    let own_script = keys::address_to_p2pkh_script(&own_address)?;
+
+    // Sum all provided UTXOs — every one of them gets spent. Refund
+    // addresses are single-use so there's nothing to leave behind.
+    let total: u64 = utxos
+        .iter()
+        .try_fold(0u64, |acc, u| {
+            acc.checked_add(u.amount)
+                .ok_or("UTXO total overflow — caller passed malformed amounts")
+        })?;
+
+    // Fee for `utxos.len()` inputs and 1-2 outputs (change is optional).
+    let fee = fees::estimate_raw_transparent_fee(utxos.len(), 2);
+    if total < amount + fee {
+        return Err(format!(
+            "Insufficient UTXOs. Have: {} sat, need: {} sat + {} sat fee",
+            total, amount, fee
+        )
+        .into());
+    }
+    let change = total - amount - fee;
+    let selected = utxos.to_vec();
+
+    let secp = secp256k1::Secp256k1::new();
+    let sk = secp256k1::SecretKey::from_slice(&privkey_bytes)
+        .map_err(|e| format!("Invalid private key: {e}"))?;
+
+    let mut signed_tx = Vec::new();
+    signed_tx.extend_from_slice(&1u32.to_le_bytes()); // version
+    write_varint(&mut signed_tx, selected.len() as u64);
+
+    let output_count: u64 = if change > 0 { 2 } else { 1 };
+
+    for (input_idx, utxo) in selected.iter().enumerate() {
+        let mut txid_bytes = crate::simd::hex::hex_string_to_bytes(&utxo.txid);
+        txid_bytes.reverse();
+        signed_tx.extend_from_slice(&txid_bytes);
+        signed_tx.extend_from_slice(&utxo.vout.to_le_bytes());
+
+        let sighash =
+            compute_sighash(&selected, &own_script, input_idx, amount, change, &to_script);
+
+        let msg = secp256k1::Message::from_digest(sighash);
+        let sig = secp.sign_ecdsa(&msg, &sk);
+        let mut sig_bytes = sig.serialize_der().to_vec();
+        sig_bytes.push(0x01); // SIGHASH_ALL
+
+        let script_sig_len = sig_bytes.len() + pubkey_bytes.len() + 2;
+        write_varint(&mut signed_tx, script_sig_len as u64);
+        signed_tx.push(sig_bytes.len() as u8);
+        signed_tx.extend_from_slice(&sig_bytes);
+        signed_tx.push(pubkey_bytes.len() as u8);
+        signed_tx.extend_from_slice(&pubkey_bytes);
+
+        signed_tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes()); // sequence
+    }
+
+    write_varint(&mut signed_tx, output_count);
+    signed_tx.extend_from_slice(&amount.to_le_bytes());
+    write_varint(&mut signed_tx, to_script.len() as u64);
+    signed_tx.extend_from_slice(&to_script);
+    if change > 0 {
+        signed_tx.extend_from_slice(&change.to_le_bytes());
+        write_varint(&mut signed_tx, own_script.len() as u64);
+        signed_tx.extend_from_slice(&own_script);
+    }
+
+    // Locktime
+    signed_tx.extend_from_slice(&0u32.to_le_bytes());
+
+    let spent: Vec<SpentOutpoint> = selected
+        .iter()
+        .map(|u| SpentOutpoint {
+            txid: u.txid.clone(),
+            vout: u.vout,
+        })
+        .collect();
+
+    Ok(TransparentTransactionResult {
+        txhex: crate::simd::hex::bytes_to_hex_string(&signed_tx),
+        spent,
+        amount,
+        fee,
+    })
+}
+
 /// Compute SIGHASH_ALL for a specific input in a v1 transparent tx.
 fn compute_sighash(
     inputs: &[SerializedUTXO],
