@@ -123,6 +123,73 @@ fn derive_shield_address_from_mnemonic() {
     }
 }
 
+/// Helper for the diversifier tests: derive the encoded extfvk from the
+/// canonical test mnemonic. Cheap enough to inline at every call site, but
+/// each test re-deriving keeps the cases independent.
+fn encoded_extfvk_for_test_mnemonic() -> String {
+    let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
+    let bip39_seed = mnemonic.to_seed("");
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&bip39_seed[..32]);
+    let extsk = keys::spending_key_from_seed(&seed, 0).unwrap();
+    let extfvk = keys::full_viewing_key(&extsk);
+    keys::encode_extfvk(&extfvk)
+}
+
+#[test]
+fn shield_address_at_zero_matches_default_address() {
+    // The default address is, by definition, the first valid diversifier
+    // starting from index 0. shield_address_at(0) should return the same
+    // address (and an index that may be 0 or a small skip-forward value).
+    let extfvk = encoded_extfvk_for_test_mnemonic();
+    let default_addr = keys::get_default_address(&extfvk).unwrap();
+    let (_idx, addr) = keys::shield_address_at(&extfvk, 0).unwrap();
+    assert_eq!(addr, default_addr);
+}
+
+#[test]
+fn shield_address_at_is_deterministic() {
+    // Calling twice with the same input must yield the same output —
+    // critical for any database that stores the address and later expects
+    // to re-derive the spending key from the index.
+    let extfvk = encoded_extfvk_for_test_mnemonic();
+    let (a_idx, a_addr) = keys::shield_address_at(&extfvk, 42).unwrap();
+    let (b_idx, b_addr) = keys::shield_address_at(&extfvk, 42).unwrap();
+    assert_eq!(a_idx, b_idx);
+    assert_eq!(a_addr, b_addr);
+}
+
+#[test]
+fn shield_address_at_advances_with_start_index() {
+    // Walking the diversifier space must yield distinct addresses. We don't
+    // make claims about which indices are valid (that's Sapling-internal),
+    // only that consecutive calls starting beyond the previous result give
+    // a different address.
+    let extfvk = encoded_extfvk_for_test_mnemonic();
+    let (idx_a, addr_a) = keys::shield_address_at(&extfvk, 0).unwrap();
+    let (idx_b, addr_b) = keys::shield_address_at(&extfvk, idx_a + 1).unwrap();
+    assert!(idx_b > idx_a);
+    assert_ne!(addr_a, addr_b);
+    assert!(addr_b.starts_with("ps"));
+}
+
+#[test]
+fn shield_address_at_produces_unique_addresses_across_a_range() {
+    // Stronger version of the previous test: walk 64 diversifiers and
+    // confirm every one is a distinct, well-formed shield address. This
+    // catches accidental wrap-around or any reuse pattern bugs.
+    let extfvk = encoded_extfvk_for_test_mnemonic();
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor: u32 = 0;
+    for _ in 0..64 {
+        let (idx, addr) = keys::shield_address_at(&extfvk, cursor).unwrap();
+        assert!(addr.starts_with("ps"), "malformed address: {}", addr);
+        assert!(seen.insert(addr.clone()), "duplicate address at idx {}: {}", idx, addr);
+        cursor = idx + 1;
+    }
+    assert_eq!(seen.len(), 64);
+}
+
 #[test]
 fn decode_transparent_address_roundtrips_to_script() {
     let addr = keys::get_transparent_address(TEST_MNEMONIC).unwrap();

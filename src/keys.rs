@@ -56,6 +56,45 @@ pub fn get_default_address(enc_extfvk: &str) -> Result<String, Box<dyn Error>> {
     Ok(encode_payment_address(&address))
 }
 
+/// Derive a shield payment address at the given diversifier index.
+///
+/// Sapling addresses are constructed from a `(diversifier, pk_d)` pair; the
+/// diversifier is an 11-byte value derived from a diversifier *index*. All
+/// addresses produced from the same extfvk decrypt to the same spending
+/// key, so an unlimited number of distinct receive addresses can be issued
+/// without the wallet needing to track multiple secrets — exactly what the
+/// merchant flow wants (one address per invoice).
+///
+/// Not every index produces a valid diversifier (~50% are rejected by the
+/// Sapling spec on hash failure), so this function scans forward from
+/// `start_index` and returns the first valid index it finds along with the
+/// encoded address. Callers track their own monotonic counter and pass
+/// `last_used + 1` to advance; the returned index is what should be
+/// persisted (skips already accounted for).
+///
+/// Returns `(used_index, encoded_address)`. `used_index >= start_index`.
+pub fn shield_address_at(
+    enc_extfvk: &str,
+    start_index: u32,
+) -> Result<(u32, String), Box<dyn Error>> {
+    use zip32::DiversifierIndex;
+
+    let extfvk = decode_extfvk(enc_extfvk)?;
+    let dfvk = extfvk.to_diversifiable_full_viewing_key();
+    let start: DiversifierIndex = DiversifierIndex::from(start_index);
+    let (idx, address) = dfvk
+        .find_address(start)
+        .ok_or("no valid diversifier found beyond start_index — exhausted the diversifier space")?;
+    // The diversifier index is an 11-byte value but for invoice-counter use
+    // cases we always pass `u32` in, so a `u32` round-trip is guaranteed
+    // unless a caller deliberately exceeded u32::MAX. Surface that as an
+    // error rather than silently truncating.
+    let used = u32::try_from(idx).map_err(|_| {
+        "diversifier index overflowed u32 — caller's start_index was too close to u32::MAX"
+    })?;
+    Ok((used, encode_payment_address(&address)))
+}
+
 // ---------------------------------------------------------------------------
 // Sapling key encoding / decoding
 // ---------------------------------------------------------------------------

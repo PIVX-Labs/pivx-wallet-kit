@@ -273,6 +273,24 @@ impl Wallet {
         crate::keys::get_default_address(&self.inner.extfvk).map_err(js_err)
     }
 
+    /// Derive a fresh shield address at the given diversifier index.
+    /// Returns `{ index, address }` — `index` may be greater than the
+    /// caller-supplied `startIndex` because invalid diversifiers are
+    /// skipped. Callers track their own cursor and pass `last_used + 1`
+    /// to get the next valid address.
+    ///
+    /// All addresses returned share the same spending key — the wallet
+    /// sees one balance even if a thousand invoice-specific addresses
+    /// are derived.
+    #[wasm_bindgen(js_name = shieldAddressAt)]
+    pub fn shield_address_at(&self, start_index: u32) -> Result<JsValue, JsError> {
+        let (idx, addr) =
+            crate::keys::shield_address_at(&self.inner.extfvk, start_index).map_err(js_err)?;
+        // serde_wasm_bindgen returns a plain JS object `{ index, address }`.
+        let out = serde_json::json!({ "index": idx, "address": addr });
+        serde_wasm_bindgen::to_value(&out).map_err(|e| JsError::new(&e.to_string()))
+    }
+
     #[wasm_bindgen(js_name = transparentAddress)]
     pub fn transparent_address(&self) -> Result<String, JsError> {
         self.ensure_unlocked()?;

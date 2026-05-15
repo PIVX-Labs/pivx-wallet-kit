@@ -6,7 +6,7 @@
 # it via [patch.crates-io] to a non-yanked source).
 [package]
 name = "pivx-wallet-kit"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "PIVX Wallet Kit — pure-Rust wallet primitives with Sapling shield support, WASM-ready"
 repository = "https://github.com/PIVX-Labs/pivx-wallet-kit"
@@ -61,6 +61,10 @@ zcash_note_encryption = "0.4"
 # to a single instance as long as our requirement and pivx_primitives'
 # (currently 0.7.1, default-features = false) overlap on the same minor.
 incrementalmerkletree = "0.7"
+# Same situation: `DiversifierIndex` lives in the `zip32` crate, but sapling
+# doesn't re-export it. We need it directly to call `shield_address_at`.
+# Resolver dedupes with sapling's pin to a single version.
+zip32 = "0.1"
 
 # Audited cryptographic primitives
 secp256k1 = { version = "0.29", features = ["global-context", "recovery"] }
