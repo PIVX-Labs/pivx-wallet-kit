@@ -450,6 +450,42 @@ impl Wallet {
         .map_err(js_err)
     }
 
+    /// Build a v1 P2PKH transparent tx from a specific HD slot,
+    /// spending caller-supplied UTXOs.
+    ///
+    /// Distinct from `sendTransparentToTransparent` in two ways:
+    /// the caller picks the signing key by HD path
+    /// (`m/44'/119'/0'/fromChange/fromIndex`), and the caller hands in
+    /// exactly the UTXOs to spend — `WalletData.unspent_utxos` is not
+    /// touched. Useful for consumers that maintain multiple receive
+    /// addresses (payment processors with one address per invoice,
+    /// hierarchical-deterministic accounting, custom sweep flows).
+    ///
+    /// Pass `amountSat = totalUtxoValue - estimatedFee` to produce a
+    /// 1-output tx with no change. Anything less leaves a change
+    /// output paying back to the source address.
+    #[wasm_bindgen(js_name = sendTransparentFromUtxos)]
+    pub fn send_transparent_from_utxos(
+        &self,
+        from_change: u32,
+        from_index: u32,
+        utxos: UtxosInput,
+        to_address: &str,
+        amount_sat: u64,
+    ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_unlocked()?;
+        let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
+        crate::transparent::builder::create_raw_transparent_transaction_from_utxos(
+            &bip39_seed,
+            from_change,
+            from_index,
+            &utxos.utxos,
+            to_address,
+            amount_sat,
+        )
+        .map_err(js_err)
+    }
+
     /// Build a transparent→shield transaction (v3 with Sapling output).
     /// Both `block_height` (chain tip + 1) and proving `params` are
     /// required.

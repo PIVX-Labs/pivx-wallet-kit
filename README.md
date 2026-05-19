@@ -169,6 +169,8 @@ localStorage.setItem('wallet', encrypted);
 
 ## Status
 
+**v0.2.3** — exposes `create_raw_transparent_transaction_from_utxos` to JS as `Wallet.sendTransparentFromUtxos(fromChange, fromIndex, utxos, toAddress, amountSat)`. Same primitive that was Rust-only in v0.2.2, now available to web wallets and Node.js consumers. Backwards-compatible; existing callers see no API change.
+
 **v0.2.2** — adds `transparent::builder::create_raw_transparent_transaction_from_utxos` for spending from any HD-indexed address with caller-supplied UTXOs. Unblocks consumers that maintain multiple receive addresses (payment processors, hierarchical accounting). Backwards-compatible; existing callers see no API change.
 
 **v0.2.1** — adds diversifier-based shield address derivation (`shield_address_at`) for merchant use cases where one address per invoice is needed. Backwards-compatible; existing callers see no API change.
