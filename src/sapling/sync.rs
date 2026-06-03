@@ -270,6 +270,30 @@ fn handle_transaction(
 /// ```
 #[inline]
 #[allow(clippy::ptr_arg)] // Witness vecs grow inside; slice would not allow `push`.
+/// Read a Bitcoin CompactSize varint at `pos`. Returns `(value, bytes_consumed)`.
+/// `< 253` is a single byte; `253`/`254`/`255` prefix a 2/4/8-byte LE value.
+/// Inverse of the bridge's encoder — the compact stream encodes the per-tx
+/// spend/output counts this way so transactions with >255 spends/outputs (e.g.
+/// the 821-spend tx in mainnet block 4,465,357) aren't truncated.
+fn read_compact_size(data: &[u8], pos: usize) -> Result<(usize, usize), Box<dyn Error>> {
+    let first = *data.get(pos).ok_or("compact size past end")?;
+    match first {
+        n if n < 253 => Ok((n as usize, 1)),
+        253 => {
+            let b = data.get(pos + 1..pos + 3).ok_or("truncated compact size")?;
+            Ok((u16::from_le_bytes([b[0], b[1]]) as usize, 3))
+        }
+        254 => {
+            let b = data.get(pos + 1..pos + 5).ok_or("truncated compact size")?;
+            Ok((u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize, 5))
+        }
+        _ => {
+            let b = data.get(pos + 1..pos + 9).ok_or("truncated compact size")?;
+            Ok((u64::from_le_bytes(b.try_into().unwrap()) as usize, 9))
+        }
+    }
+}
+
 fn handle_compact_transaction(
     tree: &mut CommitmentTree<Node, DEPTH>,
     payload: &[u8],
@@ -283,9 +307,11 @@ fn handle_compact_transaction(
         return Err("compact tx too short".into());
     }
 
-    let num_spends = payload[1] as usize;
-    let num_outputs = payload[2] as usize;
-    let mut pos = 3;
+    // Spend/output counts are CompactSize varints (not single bytes): a tx can
+    // have >255 spends/outputs, which a u8 count would silently truncate.
+    let (num_spends, c1) = read_compact_size(payload, 1)?;
+    let (num_outputs, c2) = read_compact_size(payload, 1 + c1)?;
+    let mut pos = 1 + c1 + c2;
 
     let mut nullifiers = Vec::with_capacity(num_spends);
     for _ in 0..num_spends {
@@ -403,4 +429,33 @@ fn get_nullifier_from_note(
     Ok(crate::simd::hex::bytes_to_hex_string(
         &note.nf(nullif_key, path.position().into()).0,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_compact_size;
+
+    #[test]
+    fn read_compact_size_boundaries() {
+        // <253: single byte.
+        assert_eq!(read_compact_size(&[200], 0).unwrap(), (200, 1));
+        assert_eq!(read_compact_size(&[0], 0).unwrap(), (0, 1));
+        // 253 → 0xfd + u16 LE.
+        assert_eq!(read_compact_size(&[0xfd, 0x35, 0x03], 0).unwrap(), (821, 3));
+        assert_eq!(read_compact_size(&[0xfd, 0x00, 0x01], 0).unwrap(), (256, 3));
+        // 254 → 0xfe + u32 LE.
+        assert_eq!(
+            read_compact_size(&[0xfe, 0x01, 0x00, 0x01, 0x00], 0).unwrap(),
+            (65537, 5)
+        );
+        // Reads at an offset.
+        assert_eq!(read_compact_size(&[0xff, 0xfd, 0x35, 0x03], 1).unwrap(), (821, 3));
+    }
+
+    #[test]
+    fn read_compact_size_truncated_errors() {
+        assert!(read_compact_size(&[], 0).is_err());
+        assert!(read_compact_size(&[0xfd, 0x35], 0).is_err()); // needs 2 bytes, only 1
+        assert!(read_compact_size(&[0xfe, 0x01, 0x00], 0).is_err()); // needs 4
+    }
 }
