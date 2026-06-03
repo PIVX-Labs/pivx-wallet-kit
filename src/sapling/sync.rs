@@ -268,8 +268,6 @@ fn handle_transaction(
 ///   per spend:  nullifier(32)
 ///   per output: cv(32) + cmu(32) + epk(32) + enc_ciphertext(580) + out_ciphertext(80)
 /// ```
-#[inline]
-#[allow(clippy::ptr_arg)] // Witness vecs grow inside; slice would not allow `push`.
 /// Read a Bitcoin CompactSize varint at `pos`. Returns `(value, bytes_consumed)`.
 /// `< 253` is a single byte; `253`/`254`/`255` prefix a 2/4/8-byte LE value.
 /// Inverse of the bridge's encoder — the compact stream encodes the per-tx
@@ -294,6 +292,8 @@ fn read_compact_size(data: &[u8], pos: usize) -> Result<(usize, usize), Box<dyn 
     }
 }
 
+#[inline]
+#[allow(clippy::ptr_arg)] // Witness vecs grow inside; slice would not allow `push`.
 fn handle_compact_transaction(
     tree: &mut CommitmentTree<Node, DEPTH>,
     payload: &[u8],
