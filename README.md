@@ -62,6 +62,28 @@ cargo test
 
 The native `rlib` is what downstream Rust consumers (e.g. `pivx-agent-kit`) depend on. The `wasm32-unknown-unknown` `cdylib` is the target for web wallets, distributed via npm as [`@pivx-labs/pivx-wallet-kit`](https://www.npmjs.com/package/@pivx-labs/pivx-wallet-kit).
 
+### Parallel proving (`multicore`)
+
+Groth16 proving is single-threaded by default on every target. The `multicore` feature turns on
+rayon-parallel proving in `bellman` and `sapling`:
+
+```bash
+# Native — parallelises the Groth16 FFT/multiexp across cores.
+# Recommended for servers, CLIs, and anything else not running in a browser.
+cargo build --release --features multicore
+```
+
+There is no downside to enabling it natively; it is off by default only so that the same default
+build is safe on every target. Downstream Rust consumers that care about proving latency should
+turn it on.
+
+On `wasm32` the feature additionally pulls in `wasm-bindgen-rayon`, and needs real setup: a
+nightly toolchain with `-Z build-std`, the `atomics` and `bulk-memory` target features, COOP/COEP
+headers on the serving origin, and a call to `initThreadPool` before any proving. **Without all
+of that, leave it off** — rayon in a threadless WASM build blocks forever waiting for worker
+threads that can never be spawned. The default single-threaded build proves in ~6s in-browser,
+which is slower than native but always returns.
+
 ## How to use
 
 ### Native (Rust)
@@ -168,6 +190,10 @@ localStorage.setItem('wallet', encrypted);
 **See [`examples/web-wallet/`](examples/web-wallet/) for a full runnable demo** — one HTML file + ~200 lines of JS, hits a real PIVX explorer for transparent balance, runs a real shield sync from mainnet, and demonstrates the encrypt → reload → unlock cycle a web wallet would run before writing to `localStorage`.
 
 ## Status
+
+**v0.2.5** — **fixes a hang that made every shield send unusable in the browser.** `sendTransparentToShield` (and any other Groth16 proving path) never returned in WASM builds, spinning at 100% CPU indefinitely; the same transaction built in ~0.35s natively. Cause: `bellman` and `sapling` both default-enable a `multicore` feature that pulls in rayon, and this crate declared them without `default-features = false`, so rayon shipped inside the default WASM artifact and blocked forever waiting for worker threads that a threadless build can never spawn. Both dependencies are now pinned single-threaded — matching what librustpivx's own workspace already does — and CI asserts the built artifact is rayon-free. Parallel proving remains available behind the `multicore` feature, which now switches rayon and the `wasm-bindgen-rayon` thread pool together instead of only the latter. Shield proofs take ~6s single-threaded in-browser. No API change.
+
+**v0.2.4** — `sync`: parse compact spend/output counts as CompactSize varint.
 
 **v0.2.3** — exposes `create_raw_transparent_transaction_from_utxos` to JS as `Wallet.sendTransparentFromUtxos(fromChange, fromIndex, utxos, toAddress, amountSat)`. Same primitive that was Rust-only in v0.2.2, now available to web wallets and Node.js consumers. Backwards-compatible; existing callers see no API change.
 
