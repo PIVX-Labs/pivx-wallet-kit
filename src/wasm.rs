@@ -355,31 +355,11 @@ impl Wallet {
         &mut self,
         blocks: ShieldBlocksInput,
     ) -> Result<HandleBlocksResult, JsError> {
-        // Clone instead of mem::take: if handle_blocks errors, we
-        // do not want to strand the wallet with an empty note set.
-        // The H6 zero-clone path is preserved for native consumers
-        // that can hand handle_blocks an owned Vec directly; the
-        // wasm wrapper accepts the per-note allocation cost in
-        // exchange for state-corruption safety.
-        let existing = self.inner.unspent_notes.clone();
-        let result = crate::sapling::sync::handle_blocks(
-            &self.inner.commitment_tree,
-            blocks.blocks,
-            &self.inner.extfvk,
-            existing,
-        )
-        .map_err(js_err)?;
-        // `updated_notes` is the post-batch state of existing notes
-        // (witnesses advanced); `new_notes` is what was newly
-        // discovered. handle_blocks does not filter out own notes
-        // that were spent — the nullifier list contains every spend
-        // in the batch, not just ours, so we let
-        // finalize_transaction do the matching.
-        self.inner.commitment_tree = result.commitment_tree.clone();
-        self.inner.unspent_notes = result.updated_notes.clone();
-        self.inner.unspent_notes.extend(result.new_notes.clone());
-        self.inner.finalize_transaction(&result.nullifiers);
-        Ok(result)
+        // Skips blocks at or below `lastBlock()` and advances the cursor, so
+        // re-applying a range is a no-op rather than a silent corruption of
+        // every witness position. See `apply_blocks_to_wallet`.
+        crate::sapling::sync::apply_blocks_to_wallet(&mut self.inner, blocks.blocks)
+            .map_err(js_err)
     }
 
     /// Replace the transparent UTXO set. Typical pattern: explorer →
@@ -423,6 +403,63 @@ impl Wallet {
         .map_err(js_err)
     }
 
+    /// Build one shield-source transaction paying multiple recipients.
+    ///
+    /// Unlike `sendTransparentToMany`, recipients may mix shield (`ps1...`)
+    /// and transparent (`D...`) addresses in the same transaction — the funds
+    /// come from shield notes either way. Each shield recipient may carry its
+    /// own `memo`; a memo on a transparent recipient is an error rather than
+    /// being silently dropped, since PIVX has nowhere to put it.
+    ///
+    /// Outputs are added in the order given, with shield change last.
+    /// `result.amount` is the recipient total, excluding change and fee.
+    ///
+    /// ```js
+    /// const tx = wallet.sendShieldToMany({ recipients: [
+    ///   { address: shieldAddr,      amount: 95000000n, memo: 'invoice 41' },
+    ///   { address: transparentAddr, amount:  5000000n, memo: '' },
+    /// ]}, chainTip + 1, params);
+    /// ```
+    #[wasm_bindgen(js_name = sendShieldToMany)]
+    pub fn send_shield_to_many(
+        &mut self,
+        recipients: ShieldRecipientsInput,
+        block_height: u32,
+        params: &SaplingParams,
+    ) -> Result<TransactionResult, JsError> {
+        self.ensure_unlocked()?;
+        crate::sapling::builder::create_shield_transaction_to_many(
+            &mut self.inner,
+            &recipients.recipients,
+            block_height,
+            &params.inner,
+        )
+        .map_err(js_err)
+    }
+
+    /// Fee for `sendShieldToMany` against the current note set.
+    ///
+    /// Derives the output shape from the same code the builder uses, so the
+    /// returned fee is exactly what `sendShieldToMany` will charge for the
+    /// same recipient list.
+    #[wasm_bindgen(js_name = estimateSendShieldFeeToMany)]
+    pub fn estimate_send_shield_fee_to_many(
+        &self,
+        recipients: ShieldRecipientsInput,
+    ) -> Result<u64, JsError> {
+        let (t_outs, s_outs, total) =
+            crate::sapling::builder::shield_recipient_fee_shape(&recipients.recipients)
+                .map_err(js_err)?;
+        let selection = crate::sapling::builder::select_shield_notes(
+            &self.inner.unspent_notes,
+            total,
+            t_outs,
+            s_outs,
+        )
+        .map_err(js_err)?;
+        Ok(selection.fee)
+    }
+
     /// Build a transparent-to-transparent transaction (v1 P2PKH).
     /// No Sapling params needed.
     #[wasm_bindgen(js_name = sendTransparentToTransparent)]
@@ -446,6 +483,87 @@ impl Wallet {
             amount_sat,
             0,
             None,
+        )
+        .map_err(js_err)
+    }
+
+    /// Build one transparent-to-transparent transaction paying multiple
+    /// recipients (v1 P2PKH). No Sapling params needed.
+    ///
+    /// Recipients are paid in the order given; any remainder returns to the
+    /// wallet's own address as a final change output. `result.amount` is the
+    /// sum paid to recipients, excluding change and fee.
+    ///
+    /// ```js
+    /// const tx = wallet.sendTransparentToMany({ recipients: [
+    ///   { address: sellerAddress,   amount: 95000000n },
+    ///   { address: referrerAddress, amount:  5000000n },
+    /// ]});
+    /// ```
+    ///
+    /// All recipients must be transparent (`D...`) addresses. Shield
+    /// destinations need a Sapling prover and cannot be mixed into this
+    /// transaction — use `sendTransparentToShield` for those.
+    #[wasm_bindgen(js_name = sendTransparentToMany)]
+    pub fn send_transparent_to_many(
+        &mut self,
+        recipients: RecipientsInput,
+    ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_unlocked()?;
+        let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
+        crate::transparent::builder::create_raw_transparent_transaction_to_many(
+            &mut self.inner,
+            &bip39_seed,
+            &recipients.recipients,
+        )
+        .map_err(js_err)
+    }
+
+    /// Fee for `sendTransparentToMany` against the current UTXO set.
+    ///
+    /// Counterpart to `estimateSendShieldFeeToMany`. Runs the same selection
+    /// and the same fee model the builder will, so the returned fee is what
+    /// `sendTransparentToMany` charges for the same recipient list — including
+    /// the fact that the fee grows with the number of inputs selection has to
+    /// reach for.
+    ///
+    /// Errs for the same reasons the builder would: no recipients, a zero
+    /// amount, an invalid or shield address, or insufficient funds.
+    #[wasm_bindgen(js_name = estimateSendTransparentFeeToMany)]
+    pub fn estimate_send_transparent_fee_to_many(
+        &self,
+        recipients: RecipientsInput,
+    ) -> Result<u64, JsError> {
+        crate::transparent::builder::estimate_raw_transparent_fee_to_many(
+            &self.inner,
+            &recipients.recipients,
+        )
+        .map_err(js_err)
+    }
+
+    /// Multi-recipient form of `sendTransparentFromUtxos`: spends the
+    /// caller-supplied UTXOs from a specific HD slot across several
+    /// transparent recipients.
+    ///
+    /// Every supplied UTXO is spent — no selection is applied. Pass recipient
+    /// amounts summing to `totalUtxoValue - estimatedFee` to produce a tx with
+    /// no change output.
+    #[wasm_bindgen(js_name = sendTransparentFromUtxosToMany)]
+    pub fn send_transparent_from_utxos_to_many(
+        &self,
+        from_change: u32,
+        from_index: u32,
+        utxos: UtxosInput,
+        recipients: RecipientsInput,
+    ) -> Result<TransparentTransactionResult, JsError> {
+        self.ensure_unlocked()?;
+        let bip39_seed = self.inner.get_bip39_seed().map_err(js_err)?;
+        crate::transparent::builder::create_raw_transparent_transaction_from_utxos_to_many(
+            &bip39_seed,
+            from_change,
+            from_index,
+            &utxos.utxos,
+            &recipients.recipients,
         )
         .map_err(js_err)
     }
@@ -656,6 +774,18 @@ pub struct UtxosInput {
 #[tsify(from_wasm_abi)]
 pub struct SpentInput {
     pub spent: Vec<SpentOutpoint>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(from_wasm_abi)]
+pub struct RecipientsInput {
+    pub recipients: Vec<crate::transparent::builder::Recipient>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(from_wasm_abi)]
+pub struct ShieldRecipientsInput {
+    pub recipients: Vec<crate::sapling::builder::ShieldRecipient>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]

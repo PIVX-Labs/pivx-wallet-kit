@@ -171,6 +171,14 @@ const shieldSat = wallet.shieldBalanceSat();
 // Build a transparent → transparent tx (no prover required).
 const tx = wallet.sendTransparentToTransparent(toAddress, 100_000n);
 
+// Pay several transparent recipients from one transaction. Recipients are
+// paid in order; any remainder returns to the wallet as change. `amount`
+// is the recipient total, excluding change and fee.
+const split = wallet.sendTransparentToMany({ recipients: [
+  { address: sellerAddress,   amount: 95_000_000n },
+  { address: referrerAddress, amount:  5_000_000n },
+]});
+
 // Build a shield-source tx (load proving params once per session).
 const params = new SaplingParams(outputParamsBytes, spendParamsBytes);
 const shieldTx = wallet.sendShield({
@@ -179,6 +187,14 @@ const shieldTx = wallet.sendShield({
   memo: '',
   block_height: chainTip,
 }, params);
+
+// Pay several recipients from shield notes. Unlike the transparent
+// multi-send, shield and transparent destinations can be mixed in one
+// transaction, and each shield recipient can carry its own memo.
+const shieldSplit = wallet.sendShieldToMany({ recipients: [
+  { address: shieldAddress,      amount: 95_000_000n, memo: 'invoice 41' },
+  { address: transparentAddress, amount:  5_000_000n },
+]}, chainTip + 1, params);
 
 // Consumer broadcasts `shieldTx.txhex` via whatever transport it chooses.
 
@@ -190,6 +206,46 @@ localStorage.setItem('wallet', encrypted);
 **See [`examples/web-wallet/`](examples/web-wallet/) for a full runnable demo** — one HTML file + ~200 lines of JS, hits a real PIVX explorer for transparent balance, runs a real shield sync from mainnet, and demonstrates the encrypt → reload → unlock cycle a web wallet would run before writing to `localStorage`.
 
 ## Status
+
+**v0.3.0** — multi-recipient sends (`sendTransparentToMany`, `sendShieldToMany`,
+`sendTransparentFromUtxosToMany`, plus matching fee estimators), and four fixes to
+pre-existing bugs found while building them. **The API is purely additive — no existing
+signature changed, and existing single-recipient sends produce byte-identical
+transactions** — but three fixes tighten validation, so input that was previously accepted
+is now refused. See *Upgrading to 0.3.0* below.
+
+### Upgrading to 0.3.0
+
+Existing calls keep working unchanged. Four behaviours differ, all deliberately:
+
+1. **Transparent addresses are now checksum- and version-validated.** Previously
+   `address_to_p2pkh_script` decoded base58 without verifying either, so a single mistyped
+   character was accepted and paid a pubkey hash nobody holds the key for. Addresses from
+   other networks, and PIVX P2SH addresses (`7...`), were also accepted and wrapped in a
+   P2PKH script, which is unspendable. All of these now error. If a consumer was relying on
+   sending to P2SH addresses, those sends were never recoverable and need a real P2SH path.
+
+2. **Duplicate outpoints are rejected.** Blockbook lists the same UTXO twice while a
+   transaction is confirming, which made the wallet read double its balance and build a
+   transaction spending one output twice. `parseBlockbookUtxos` now collapses duplicates,
+   and the builders refuse a set that still contains any — including UTXOs supplied
+   directly to `sendTransparentFromUtxos*`.
+
+3. **`applyBlocks` now advances `lastBlock()` and skips already-applied heights.** This is
+   the one that needs an action. Previously `last_block` only ever moved in
+   `resetToCheckpoint`, so a consumer syncing from `lastBlock() + 1` — the pattern this
+   README and the web-wallet example both document — re-applied the whole range from the
+   checkpoint on every sync after the first, advancing the commitment tree twice and
+   shifting every witness position.
+
+   **Wallets persisted by an earlier version carry that stale cursor**, so their first sync
+   after upgrading re-applies once more. Call `resetToCheckpoint()` and resync once after
+   upgrading; that restores state byte-identical to a fresh sync. Wallets created on 0.3.0
+   need nothing.
+
+4. **Over-long shield memos are rejected by the fee estimator**, not only by the builder.
+   The 512-byte Sapling limit is on encoded bytes, so a 200-character string of multi-byte
+   characters (600 bytes) is refused.
 
 **v0.2.5** — **fixes a hang that made every shield send unusable in the browser.** `sendTransparentToShield` (and any other Groth16 proving path) never returned in WASM builds, spinning at 100% CPU indefinitely; the same transaction built in ~0.35s natively. Cause: `bellman` and `sapling` both default-enable a `multicore` feature that pulls in rayon, and this crate declared them without `default-features = false`, so rayon shipped inside the default WASM artifact and blocked forever waiting for worker threads that a threadless build can never spawn. Both dependencies are now pinned single-threaded — matching what librustpivx's own workspace already does — and CI asserts the built artifact is rayon-free. Parallel proving remains available behind the `multicore` feature, which now switches rayon and the `wasm-bindgen-rayon` thread pool together instead of only the latter. Shield proofs take ~6s single-threaded in-browser. No API change.
 

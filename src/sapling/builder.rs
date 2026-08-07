@@ -90,6 +90,140 @@ pub fn select_shield_notes(
     .into())
 }
 
+/// One recipient of a shield-sourced send.
+///
+/// `address` may be either a shield (`ps1...`) or transparent (`D...`)
+/// address — a single transaction can pay a mix of both, since the funds come
+/// from shield notes either way.
+///
+/// `memo` is only meaningful for shield destinations; PIVX has nowhere to put
+/// a memo on a transparent output, so a non-empty memo alongside a transparent
+/// address is rejected rather than silently dropped.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, tsify::Tsify)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
+pub struct ShieldRecipient {
+    pub address: String,
+    #[tsify(type = "bigint")]
+    pub amount: u64,
+    #[serde(default)]
+    pub memo: String,
+}
+
+/// Recipients split by destination pool, with the output counts the fee model
+/// needs.
+struct ResolvedShieldOutputs {
+    /// `(address, amount, encoded memo)` in caller order.
+    ///
+    /// Memos are encoded here rather than in the builder so that a memo which
+    /// cannot be encoded is rejected at resolution time — which means the fee
+    /// estimator rejects it too, instead of quoting a fee for a send that would
+    /// later fail to build.
+    outputs: Vec<(GenericAddress, u64, MemoBytes)>,
+    transparent_outs: u64,
+    sapling_outs: u64,
+    total_amount: u64,
+}
+
+/// Decode and validate recipients, and work out the output shape for fee
+/// estimation.
+///
+/// The sapling output count is `shield recipients + 1` for change, floored at
+/// 2. The floor matters: a Sapling bundle pads to two outputs with a dummy
+/// note, so a single-shield-output send still pays for two. That floor is what
+/// the previous fixed `(_, 2)` shape encoded, and dropping it would
+/// under-estimate the fee and strand transactions unconfirmed.
+fn resolve_shield_recipients(
+    recipients: &[ShieldRecipient],
+    network: &Network,
+) -> Result<ResolvedShieldOutputs, Box<dyn Error>> {
+    if recipients.is_empty() {
+        return Err("No recipients provided".into());
+    }
+
+    let mut outputs = Vec::with_capacity(recipients.len());
+    let mut transparent_outs = 0u64;
+    let mut shield_outs = 0u64;
+    let mut total_amount = 0u64;
+
+    for r in recipients {
+        if r.amount == 0 {
+            return Err(format!("Recipient {} has a zero amount", r.address).into());
+        }
+        total_amount = total_amount
+            .checked_add(r.amount)
+            .ok_or("Recipient amounts overflow u64")?;
+
+        let decoded = keys::decode_generic_address(&r.address)?;
+        let memo_bytes = match decoded {
+            GenericAddress::Shield(_) => {
+                shield_outs += 1;
+                if r.memo.is_empty() {
+                    MemoBytes::empty()
+                } else {
+                    // Encoding here is the validation: a Sapling memo field is
+                    // 512 bytes, and the limit is on encoded *bytes*, so a
+                    // short string of multi-byte characters can still overflow
+                    // it. Rejecting at resolution keeps the estimator and the
+                    // builder in agreement about what is sendable.
+                    Memo::from_str(&r.memo)
+                        .map_err(|e| {
+                            format!(
+                                "Invalid memo for recipient {} ({} bytes): {}",
+                                r.address,
+                                r.memo.len(),
+                                e
+                            )
+                        })?
+                        .encode()
+                }
+            }
+            GenericAddress::Transparent(_) => {
+                if !r.memo.is_empty() {
+                    return Err(format!(
+                        "Recipient {} is transparent but carries a memo — transparent outputs \
+                         cannot hold memos",
+                        r.address
+                    )
+                    .into());
+                }
+                transparent_outs += 1;
+                MemoBytes::empty()
+            }
+        };
+        outputs.push((decoded, r.amount, memo_bytes));
+    }
+
+    debug_assert_eq!(
+        network.hrp_sapling_payment_address(),
+        Network::MainNetwork.hrp_sapling_payment_address(),
+        "shield recipient resolution assumes mainnet HRPs"
+    );
+
+    Ok(ResolvedShieldOutputs {
+        outputs,
+        transparent_outs,
+        sapling_outs: (shield_outs + 1).max(2),
+        total_amount,
+    })
+}
+
+/// The `(transparent_outs, sapling_outs, recipient_total)` a recipient list
+/// implies, for callers that need to estimate a fee without building.
+///
+/// Exposed so the fee estimator and the builder derive the output shape from
+/// the same code. A fee returned against this shape is exactly what
+/// [`create_shield_transaction_to_many`] will charge for the same recipients.
+pub fn shield_recipient_fee_shape(
+    recipients: &[ShieldRecipient],
+) -> Result<(u64, u64, u64), Box<dyn Error>> {
+    let resolved = resolve_shield_recipients(recipients, &Network::MainNetwork)?;
+    Ok((
+        resolved.transparent_outs,
+        resolved.sapling_outs,
+        resolved.total_amount,
+    ))
+}
+
 /// Result of building a shield transaction.
 #[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
@@ -112,15 +246,44 @@ pub fn create_shield_transaction(
     block_height: u32,
     prover: &SaplingProver,
 ) -> Result<TransactionResult, Box<dyn Error>> {
+    create_shield_transaction_to_many(
+        wallet,
+        &[ShieldRecipient {
+            address: to_address.to_string(),
+            amount,
+            memo: memo.to_string(),
+        }],
+        block_height,
+        prover,
+    )
+}
+
+/// Multi-recipient form of [`create_shield_transaction`]: spend the wallet's
+/// notes across any number of destinations in one transaction.
+///
+/// Recipients may mix shield (`ps1...`) and transparent (`D...`) addresses
+/// freely — the funds come from shield notes either way, so unlike the
+/// transparent builders there is no need to split the send. Each shield
+/// recipient may carry its own memo.
+///
+/// Outputs are added in the order given, with shield change appended last.
+/// `TransactionResult::amount` is the recipient total, excluding change and
+/// fee.
+///
+/// `prover` must be supplied by the caller (see
+/// [`crate::sapling::prover::verify_and_load_params`]). `block_height` should
+/// be the chain tip + 1, fetched by the consumer.
+pub fn create_shield_transaction_to_many(
+    wallet: &mut WalletData,
+    recipients: &[ShieldRecipient],
+    block_height: u32,
+    prover: &SaplingProver,
+) -> Result<TransactionResult, Box<dyn Error>> {
     let extsk = wallet.derive_extsk()?;
     let network = Network::MainNetwork;
 
-    let (transparent_output_count, sapling_output_count) =
-        if to_address.starts_with(network.hrp_sapling_payment_address()) {
-            (0u64, 2u64)
-        } else {
-            (1u64, 2u64)
-        };
+    let resolved = resolve_shield_recipients(recipients, &network)?;
+    let amount = resolved.total_amount;
 
     // Single source of truth for which notes to spend and what fee
     // to charge — shared with `Wallet.estimateSendShieldFee` so the
@@ -128,8 +291,8 @@ pub fn create_shield_transaction(
     let selection = select_shield_notes(
         &wallet.unspent_notes,
         amount,
-        transparent_output_count,
-        sapling_output_count,
+        resolved.transparent_outs,
+        resolved.sapling_outs,
     )?;
     let total = selection.total;
     let fee = selection.fee;
@@ -182,28 +345,36 @@ pub fn create_shield_transaction(
         nullifiers.push(crate::simd::hex::bytes_to_hex_string(&nullifier.to_vec()));
     }
 
-    let send_amount = Zatoshis::from_u64(amount).map_err(|_| "Invalid amount")?;
-    let change_amount =
-        Zatoshis::from_u64(total - amount - fee).map_err(|_| "Invalid change")?;
+    // `select_shield_notes` guarantees total >= amount + fee, so this cannot
+    // underflow — but it is subtraction on caller-influenced values, so keep
+    // it checked rather than relying on that invariant holding forever.
+    let change_amount = total
+        .checked_sub(amount)
+        .and_then(|v| v.checked_sub(fee))
+        .ok_or("Selected notes do not cover amount plus fee")?;
+    let change_amount = Zatoshis::from_u64(change_amount).map_err(|_| "Invalid change")?;
 
-    let to = keys::decode_generic_address(to_address)?;
-    match to {
-        GenericAddress::Transparent(addr) => {
-            builder
-                .add_transparent_output(&addr, send_amount)
-                .map_err(|e| format!("Failed to add transparent output: {:?}", e))?;
-        }
-        GenericAddress::Shield(addr) => {
-            let memo_bytes = if memo.is_empty() {
-                MemoBytes::empty()
-            } else {
-                Memo::from_str(memo)
-                    .map_err(|e| format!("Invalid memo: {}", e))?
-                    .encode()
-            };
-            builder
-                .add_sapling_output::<FeeRule>(None, addr, send_amount, memo_bytes)
-                .map_err(|_| "Failed to add sapling output")?;
+    for (addr, out_amount, memo_bytes) in &resolved.outputs {
+        let send_amount = Zatoshis::from_u64(*out_amount).map_err(|_| "Invalid amount")?;
+        match addr {
+            GenericAddress::Transparent(addr) => {
+                builder
+                    .add_transparent_output(addr, send_amount)
+                    .map_err(|e| format!("Failed to add transparent output: {:?}", e))?;
+            }
+            GenericAddress::Shield(addr) => {
+                // Memo already validated and encoded by
+                // `resolve_shield_recipients`, so there is nothing here that
+                // can fail differently from what the estimator saw.
+                builder
+                    .add_sapling_output::<FeeRule>(
+                        None,
+                        *addr,
+                        send_amount,
+                        memo_bytes.clone(),
+                    )
+                    .map_err(|_| "Failed to add sapling output")?;
+            }
         }
     }
 

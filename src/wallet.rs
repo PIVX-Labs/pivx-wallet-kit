@@ -51,7 +51,7 @@ pub struct SerializedUTXO {
 /// and consumers that need them can reconstruct P2PKH from the spending
 /// wallet's address.
 pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
-    let mut utxos = Vec::new();
+    let mut utxos: Vec<SerializedUTXO> = Vec::new();
     for u in raw {
         let txid = u["txid"].as_str().unwrap_or_default().to_string();
         let vout = u["vout"].as_u64().unwrap_or(0) as u32;
@@ -63,6 +63,29 @@ pub fn parse_blockbook_utxos(raw: &[serde_json::Value]) -> Vec<SerializedUTXO> {
         let height = u["height"].as_u64().unwrap_or(0) as u32;
 
         if txid.is_empty() || amount == 0 {
+            continue;
+        }
+
+        // Deduplicate by outpoint. Blockbook can list the same UTXO twice
+        // while a transaction is confirming — once from its mempool view
+        // (confirmations 0, height 0) and once as confirmed — and observed
+        // responses do exactly that. Ingesting both doubles the apparent
+        // balance and makes the builder select the same outpoint twice,
+        // producing a transaction that spends one output twice. That is a
+        // guaranteed network rejection, and it looks like a wallet bug from
+        // the outside, so the guard belongs here at the parse boundary rather
+        // than in each builder.
+        //
+        // Linear scan: UTXO sets are small, and it keeps input order
+        // deterministic (first sighting wins its position) without pulling in
+        // a hash map.
+        if let Some(existing) = utxos
+            .iter_mut()
+            .find(|e| e.vout == vout && e.txid == txid)
+        {
+            // Prefer the confirmed sighting's height — the mempool copy
+            // reports 0, which would misrepresent the UTXO's age.
+            existing.height = existing.height.max(height);
             continue;
         }
 

@@ -5,7 +5,7 @@
 //! handle network fetching and persistence.
 
 use crate::keys;
-use crate::wallet::SerializedNote;
+use crate::wallet::{SerializedNote, WalletData};
 use incrementalmerkletree::frontier::CommitmentTree;
 use incrementalmerkletree::witness::IncrementalWitness;
 use pivx_client_backend::decrypt_transaction;
@@ -106,6 +106,65 @@ impl SpendableNote {
 /// updated set) save one allocation per note. Consumers that only
 /// have a slice should clone before calling — the cost is the same
 /// either way, just relocated to the call site.
+/// Apply shield blocks to a wallet, advancing its sync cursor.
+///
+/// Prefer this over calling [`handle_blocks`] and updating `WalletData` by hand:
+/// it skips blocks at or below `wallet.last_block` and moves the cursor to the
+/// highest height applied, which together make re-application harmless.
+///
+/// That guard is not cosmetic. Applying a block twice advances the commitment
+/// tree twice and re-adds notes the wallet already holds; the inflated balance
+/// is the visible symptom, but the damaging part is that every witness position
+/// shifts, so anchors derived from them no longer match the chain and every
+/// spend built afterwards is rejected. Because `last_block` previously only
+/// moved in `reset_to_checkpoint`, a caller syncing from `last_block + 1` — the
+/// pattern this crate's own example documents — replayed the whole range from
+/// the checkpoint on every sync after the first.
+///
+/// Block heights need not be contiguous. The compact stream only carries blocks
+/// containing shield data, so gaps are the normal case and cannot be
+/// distinguished from missing data at this layer.
+pub fn apply_blocks_to_wallet(
+    wallet: &mut WalletData,
+    blocks: Vec<ShieldBlock>,
+) -> Result<HandleBlocksResult, Box<dyn Error>> {
+    let last = i64::from(wallet.last_block);
+    let fresh: Vec<ShieldBlock> = blocks
+        .into_iter()
+        .filter(|b| i64::from(b.height) > last)
+        .collect();
+
+    if fresh.is_empty() {
+        // Report current state rather than erroring, so re-syncing an
+        // already-current wallet is a harmless no-op.
+        return Ok(HandleBlocksResult {
+            commitment_tree: wallet.commitment_tree.clone(),
+            new_notes: Vec::new(),
+            updated_notes: wallet.unspent_notes.clone(),
+            nullifiers: Vec::new(),
+        });
+    }
+
+    let highest = fresh.iter().map(|b| b.height).max();
+
+    // Clone rather than take: if handle_blocks errors we must not strand the
+    // wallet with an empty note set.
+    let existing = wallet.unspent_notes.clone();
+    let result = handle_blocks(&wallet.commitment_tree, fresh, &wallet.extfvk, existing)?;
+
+    wallet.commitment_tree = result.commitment_tree.clone();
+    wallet.unspent_notes = result.updated_notes.clone();
+    wallet.unspent_notes.extend(result.new_notes.clone());
+    // handle_blocks surfaces every nullifier in the batch, not just ours, so
+    // finalize_transaction does the matching.
+    wallet.finalize_transaction(&result.nullifiers);
+    if let Some(h) = highest {
+        wallet.last_block = h as i32;
+    }
+
+    Ok(result)
+}
+
 pub fn handle_blocks(
     tree_hex: &str,
     blocks: Vec<ShieldBlock>,

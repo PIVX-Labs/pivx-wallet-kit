@@ -414,6 +414,60 @@ fn parse_blockbook_utxos_handles_string_and_number_values() {
     assert_eq!(utxos[1].vout, 2);
 }
 
+/// Blockbook lists the same UTXO twice while a transaction is confirming —
+/// once from its mempool view (height 0) and once as confirmed. Observed
+/// live on mainnet. Ingesting both doubles the apparent balance and makes the
+/// builder spend one outpoint twice, which the network rejects.
+///
+/// Distinct from `parse_blockbook_utxos_handles_string_and_number_values`,
+/// which the assertion count makes it resemble: that one checks `value` parses
+/// from either a JSON string or a number, across two *already distinct*
+/// outpoints. This one starts with four entries covering two real outpoints and
+/// checks they collapse. Both land on `len() == 2`, by different routes.
+#[test]
+fn parse_blockbook_utxos_deduplicates_outpoints() {
+    let txid = "7f0754fe17519180f97538a80b5018ed861770bd6804fc8ca8c84ad1a86f59b8";
+    // Exactly the shape the explorer returned mid-confirmation.
+    let raw = vec![
+        serde_json::json!({ "txid": txid, "vout": 3, "value": "4000000",  "height": 0 }),
+        serde_json::json!({ "txid": txid, "vout": 4, "value": "49818080", "height": 0 }),
+        serde_json::json!({ "txid": txid, "vout": 4, "value": "49818080", "height": 5_519_222 }),
+        serde_json::json!({ "txid": txid, "vout": 3, "value": "4000000",  "height": 5_519_222 }),
+    ];
+
+    let parsed = wallet::parse_blockbook_utxos(&raw);
+
+    assert_eq!(parsed.len(), 2, "duplicate outpoints must collapse to one each");
+    let total: u64 = parsed.iter().map(|u| u.amount).sum();
+    assert_eq!(total, 53_818_080, "balance must not be double-counted");
+
+    // Distinct outpoints, and the confirmed height wins over the mempool 0.
+    let mut outpoints: Vec<(String, u32)> =
+        parsed.iter().map(|u| (u.txid.clone(), u.vout)).collect();
+    outpoints.sort();
+    assert_eq!(outpoints, vec![(txid.to_string(), 3), (txid.to_string(), 4)]);
+    for u in &parsed {
+        assert_eq!(
+            u.height, 5_519_222,
+            "confirmed height should win over the mempool sighting's 0"
+        );
+    }
+}
+
+/// Distinct vouts of the same txid are different outpoints and must both
+/// survive — the dedupe must key on (txid, vout), not txid alone.
+#[test]
+fn parse_blockbook_utxos_keeps_distinct_vouts_of_one_txid() {
+    let txid = "a".repeat(64);
+    let raw: Vec<serde_json::Value> = (0..5)
+        .map(|v| serde_json::json!({ "txid": txid, "vout": v, "value": "1000", "height": 100 }))
+        .collect();
+
+    let parsed = wallet::parse_blockbook_utxos(&raw);
+    assert_eq!(parsed.len(), 5, "distinct vouts must not be collapsed");
+    assert_eq!(parsed.iter().map(|u| u.amount).sum::<u64>(), 5_000);
+}
+
 #[test]
 fn parse_blockbook_utxos_skips_zero_and_empty() {
     let raw = vec![

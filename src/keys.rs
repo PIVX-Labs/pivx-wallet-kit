@@ -217,13 +217,57 @@ pub fn decode_generic_address(address: &str) -> Result<GenericAddress, Box<dyn E
 
 /// Decode a base58 transparent PIVX address to its P2PKH scriptPubKey.
 /// Returns the raw script bytes: `OP_DUP OP_HASH160 <20-byte-hash> OP_EQUALVERIFY OP_CHECKSIG`.
+///
+/// Validates the Base58Check checksum and the version byte before building a
+/// script. Both matter, and skipping either loses funds irrecoverably:
+///
+///  * **Checksum.** A single mistyped character changes the pubkey hash. The
+///    resulting output pays a hash nobody holds the key for, and the coins are
+///    gone. Catching exactly this is why Base58Check exists, so a plain
+///    `bs58::decode` is not sufficient here.
+///  * **Version byte.** Wrapping a non-P2PKH hash in a P2PKH script produces an
+///    output that can never be satisfied. A PIVX P2SH address (prefix 13,
+///    `7...`) carries a *script* hash; spending a P2PKH output requires a
+///    *public key* whose hash matches, which no script hash will ever be.
+///    Addresses from other networks are rejected for the same reason.
+///
+/// Callers that need P2SH support want a separate script builder — this one is
+/// P2PKH by construction, so it refuses anything else rather than silently
+/// mislabelling it.
 pub fn address_to_p2pkh_script(address: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let decoded = bs58::decode(address).into_vec()
+    let decoded = bs58::decode(address)
+        .into_vec()
         .map_err(|e| format!("Invalid base58 address: {e}"))?;
     if decoded.len() != 25 {
-        return Err("Invalid address length".into());
+        return Err(format!(
+            "Invalid address length: {} bytes, expected 25 (1 version + 20 hash + 4 checksum)",
+            decoded.len()
+        )
+        .into());
     }
-    let pkh = &decoded[1..21];
+
+    // Base58Check: the trailing 4 bytes are the first 4 of double-SHA256 over
+    // the version-and-hash payload.
+    let (payload, checksum) = decoded.split_at(21);
+    let expected = Sha256::digest(Sha256::digest(payload));
+    if expected[..4] != checksum[..] {
+        return Err(format!(
+            "Invalid address checksum for {address} — the address is mistyped or corrupted"
+        )
+        .into());
+    }
+
+    if payload[0] != PIVX_PUBKEY_PREFIX {
+        return Err(format!(
+            "Address {address} has version byte {} — not a PIVX transparent (P2PKH) address, \
+             which uses {PIVX_PUBKEY_PREFIX}. Paying it as P2PKH would create an unspendable \
+             output.",
+            payload[0]
+        )
+        .into());
+    }
+
+    let pkh = &payload[1..21];
     let mut script = vec![0x76, 0xa9, 0x14];
     script.extend_from_slice(pkh);
     script.push(0x88);
