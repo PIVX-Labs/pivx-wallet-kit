@@ -1,4 +1,4 @@
-// PIVX Wallet Kit — tiny browser demo (v0.2 class-style API).
+// PIVX Wallet Kit: tiny browser demo (v0.2 class-style API).
 //
 // Loads the WASM, derives addresses from a BIP39 mnemonic, fetches transparent
 // UTXOs from Blockbook and sums them via the kit's parser, and demonstrates the
@@ -11,7 +11,7 @@
 //     wasm-pack build --release --target web
 //
 // NOTE: that overwrites `../../pkg/` with the web-target shape. The npm
-// publish artifact is built with `--target bundler` instead — running both
+// publish artifact is built with `--target bundler` instead: running both
 // from the same checkout means re-running the publish build before tagging.
 
 import init, {
@@ -25,9 +25,19 @@ import init, {
 const RPC = 'https://rpc.pivxla.bz/mainnet';
 const EXPLORER = 'https://explorer.pivxla.bz';
 /// Process decoded blocks in chunks of this size when feeding them to
-/// `wallet.applyBlocks`. This is purely for progress UI — the full stream is
+/// `wallet.applyBlocks`. This is purely for progress UI: the full stream is
 /// fetched and parsed in one go, so batch boundaries don't truncate.
 const SHIELD_HANDLE_CHUNK = 500;
+
+/// Cap on explorer requests in flight while joining scripts onto a UTXO set.
+/// A delegation that has been staking for a while has one output per stake, so
+/// the funding-transaction list runs into the hundreds.
+const FETCH_CONCURRENCY = 6;
+
+/// PIVX applies COINBASE_MATURITY to coinstake outputs too, so a staked
+/// delegation cannot be spent until it is 100 blocks deep. `GetBlocksToMaturity`
+/// is `(COINBASE_MATURITY + 1) - depth`, hence the `>` rather than `>=` below.
+const COINSTAKE_MATURITY = 100;
 
 const $ = (id) => document.getElementById(id);
 
@@ -38,6 +48,83 @@ async function passphraseToKey(passphrase) {
   return new Uint8Array(digest);
 }
 
+/** `items.map(fn)` with at most `limit` promises in flight, preserving order. */
+async function mapWithLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+/**
+ * Whether a transaction is a coinstake, by structure rather than by any one
+ * explorer's labelling: PIVX marks a coinstake with an empty zero-value first
+ * output, and unlike a coinbase it always spends a real input.
+ *
+ * This matters because staking a delegation *consumes and recreates it*. The
+ * replacement is a coinstake output, and PIVX will not let it be spent until it
+ * matures, so a withdrawal built against a fresh one is rejected.
+ */
+const isCoinstakeTx = (tx) =>
+  tx.vout.length >= 2 && tx.vout[0].value === '0' && !!tx.vin?.[0]?.txid;
+
+/**
+ * Fetch an address's UTXOs, each with its scriptPubKey and a `coinstake` flag.
+ *
+ * The UTXO endpoint carries no script, on Blockbook or on its work-alikes, so
+ * getting one takes a second call per funding transaction. An ordinary send
+ * doesn't need it, but a cold-staking delegation is recognisable *only* from
+ * its script: without it `delegatedBalanceSat()` reads 0, delegated outputs get
+ * counted as spendable, and `withdrawColdStake` has nothing to sign against.
+ *
+ * The same responses answer the maturity question for free, so the flag rides
+ * along; see `spendableNow`.
+ */
+async function fetchUtxos(address) {
+  const resp = await fetch(`${EXPLORER}/api/v2/utxo/${address}?confirmed=true`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const utxos = await resp.json();
+
+  // One fetch per distinct funding tx, not per UTXO: several UTXOs commonly
+  // share one, and a split delegation always does. Bounded, because a
+  // long-running delegation accumulates one output per stake and an unbounded
+  // Promise.all over a few hundred of them exhausts the connection pool before
+  // the explorer can answer any of them.
+  const txids = [...new Set(utxos.map((u) => u.txid))];
+  const txs = await mapWithLimit(txids, FETCH_CONCURRENCY, async (txid) => {
+    const r = await fetch(`${EXPLORER}/api/v2/tx/${txid}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${txid}`);
+    return r.json();
+  });
+
+  const outputs = new Map();
+  for (const tx of txs) {
+    const coinstake = isCoinstakeTx(tx);
+    for (const o of tx.vout) outputs.set(`${tx.txid}:${o.n}`, { script: o.hex, coinstake });
+  }
+
+  return utxos.map((u) => {
+    const { script = '', coinstake = false } = outputs.get(`${u.txid}:${u.vout}`) ?? {};
+    return { ...u, script, coinstake };
+  });
+}
+
+/**
+ * The subset a transaction may actually spend right now.
+ *
+ * The kit enforces this itself once `coinstake` and `confirmations` are set, so
+ * this is only needed to *report* what is being held back. Builders will refuse
+ * an immature input either way.
+ */
+const spendableNow = (utxos) =>
+  utxos.filter((u) => !u.coinstake || u.confirmations > COINSTAKE_MATURITY);
+
 /** Render a snapshot of wallet-visible state for the demo's debug panel. */
 function renderState(wallet) {
   const view = {
@@ -46,6 +133,9 @@ function renderState(wallet) {
     birthday: wallet.birthdayHeight(),
     shield_balance_sat: wallet.shieldBalanceSat().toString(),
     transparent_balance_sat: wallet.transparentBalanceSat().toString(),
+    // Both stay 0 unless fetchUtxos attached the script and maturity fields.
+    delegated_balance_sat: wallet.delegatedBalanceSat().toString(),
+    immature_balance_sat: wallet.immatureBalanceSat().toString(),
     unspent_notes: wallet.notes().notes.length,
     unspent_utxos: wallet.utxos().utxos.length,
   };
@@ -96,9 +186,7 @@ async function main() {
     $('balance-result').innerHTML = '<span class="muted">Fetching…</span>';
 
     try {
-      const resp = await fetch(`${EXPLORER}/api/v2/utxo/${addr}?confirmed=true`);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const raw = await resp.json();
+      const raw = await fetchUtxos(addr);
 
       // Push the parsed UTXO set into the wallet so it owns the canonical
       // view. Subsequent transparentBalanceSat() / utxos() reads come back
@@ -110,9 +198,15 @@ async function main() {
       const piv = formatSatToPiv(totalSat);
       const n = parsed.utxos.length;
 
+      // What a builder could actually spend right now. Anything held back is a
+      // recently staked delegation waiting out its maturity, not a lost coin,
+      // so it is reported rather than silently dropped.
+      const immature = raw.length - spendableNow(raw).length;
+
       $('balance-result').innerHTML =
         `<span class="status-ok">${piv} PIV</span> ` +
-        `<span class="muted">(${n} UTXO${n === 1 ? '' : 's'})</span>`;
+        `<span class="muted">(${n} UTXO${n === 1 ? '' : 's'}` +
+        `${immature ? `, ${immature} immature` : ''})</span>`;
 
       renderState(wallet);
     } catch (err) {
@@ -128,13 +222,18 @@ async function main() {
     $('shield-result').innerHTML = '<span class="muted">Syncing from checkpoint…</span>';
 
     try {
-      // Fetch the entire compact stream in a single request. Re-fetching in
-      // batches would truncate the last block of each batch (its header is
-      // counted but subsequent tx packets aren't read before the cap-exit),
-      // silently losing cmus and corrupting every subsequent witness position.
+      // Fetch the entire stream in a single request. Re-fetching in batches
+      // would truncate the last block of each batch (its marker is counted but
+      // subsequent tx packets aren't read before the cap-exit), silently losing
+      // cmus and corrupting every subsequent witness position.
+      //
+      // No `format` parameter: the node ignores it and serves footer-framed
+      // full-raw transactions either way (verified byte-identical responses
+      // with and without `format=compact`). Passing it suggested a choice that
+      // does not exist.
       const startBlock = wallet.lastBlock() + 1;
       const resp = await fetch(
-        `${RPC}/getshielddata?startBlock=${startBlock}&format=compact`
+        `${RPC}/getshielddata?startBlock=${startBlock}`
       );
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const bytes = new Uint8Array(await resp.arrayBuffer());
@@ -177,7 +276,7 @@ async function main() {
 
   // The encrypt/decrypt pair demonstrates the round-trip a real web wallet
   // runs before writing to localStorage. The plaintext seed/mnemonic never
-  // leaves WASM memory in encrypted form — the JSON returned by
+  // leaves WASM memory in encrypted form: the JSON returned by
   // toSerializedEncrypted() is safe to persist anywhere.
   $('encrypt').onclick = async () => {
     if (!wallet) return;
@@ -185,7 +284,7 @@ async function main() {
     if (!pass) { alert('Enter a passphrase.'); return; }
     const key = await passphraseToKey(pass);
     const encrypted = wallet.toSerializedEncrypted(key);
-    // Replace the live wallet with one reconstructed from the ciphertext —
+    // Replace the live wallet with one reconstructed from the ciphertext:
     // it'll come back in the LOCKED state. JS now only holds the encrypted
     // JSON, mirroring the persist→reload cycle a real wallet would run.
     wallet.free();

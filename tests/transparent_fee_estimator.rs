@@ -1,7 +1,7 @@
 //! `estimate_raw_transparent_fee_to_many` must never disagree with the builder.
 //!
 //! The transparent fee depends on how many inputs selection reaches for, which
-//! depends on the recipient total — so an estimator doing its own selection
+//! depends on the recipient total, so an estimator doing its own selection
 //! could quote a fee the builder then contradicts. Both go through
 //! `select_transparent_utxos` for that reason, and these tests pin the
 //! agreement rather than trusting it.
@@ -27,6 +27,7 @@ fn utxo(letter: &str, vout: u32, amount: u64) -> SerializedUTXO {
         amount,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }
 }
 
@@ -162,7 +163,7 @@ fn estimate_rejects_everything_the_builder_rejects() {
     }
 }
 
-/// Estimating must not mutate the wallet — a caller may quote several shapes
+/// Estimating must not mutate the wallet: a caller may quote several shapes
 /// before choosing one.
 #[test]
 fn estimating_does_not_disturb_the_wallet() {

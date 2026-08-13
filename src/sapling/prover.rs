@@ -1,6 +1,6 @@
 //! Sapling proving parameter verification and parsing.
 //!
-//! The kit does not touch the filesystem or network — consumers are
+//! The kit does not touch the filesystem or network: consumers are
 //! responsible for sourcing the raw bytes (from an on-disk cache, an HTTPS
 //! download, or a bundled asset). Once bytes are in hand, pass them to
 //! [`verify_and_load_params`] to validate their SHA256 against the pinned

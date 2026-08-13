@@ -37,7 +37,7 @@ fn decode_raw(address: &str) -> Vec<u8> {
     bs58::decode(address).into_vec().unwrap()
 }
 
-/// A valid address must still work — the validation must not be so strict it
+/// A valid address must still work: the validation must not be so strict it
 /// rejects real addresses.
 #[test]
 fn accepts_a_valid_address() {
@@ -82,7 +82,7 @@ fn rejects_a_single_byte_payload_typo() {
 }
 
 /// A typo confined to the checksum bytes does not change the destination, but
-/// must still be rejected — it is indistinguishable from a payload typo from
+/// must still be rejected: it is indistinguishable from a payload typo from
 /// the user's point of view, and accepting it means the checksum is not being
 /// checked at all.
 #[test]
@@ -101,7 +101,7 @@ fn rejects_a_checksum_only_typo() {
 
 /// A PIVX P2SH address carries a *script* hash. Wrapping it in a P2PKH script
 /// demands a public key whose hash equals that script hash, which nothing will
-/// ever satisfy — the output is unspendable forever.
+/// ever satisfy: the output is unspendable forever.
 #[test]
 fn rejects_pivx_p2sh_address() {
     let pkh = decode_raw(&valid_address())[1..21].to_vec();
@@ -161,7 +161,7 @@ fn accepts_only_the_pivx_pubkey_version_byte() {
     );
 }
 
-/// Structurally malformed input must error rather than panic — these arrive
+/// Structurally malformed input must error rather than panic: these arrive
 /// from JS callers, so an index-out-of-bounds would be a wasm trap.
 #[test]
 fn rejects_malformed_input_without_panicking() {

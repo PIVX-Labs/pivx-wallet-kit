@@ -1,4 +1,4 @@
-//! Shield block processing — decrypt notes, track nullifiers, update witnesses.
+//! Shield block processing: decrypt notes, track nullifiers, update witnesses.
 //!
 //! Pure transforms: feed in `(tree_hex, blocks, enc_extfvk, existing_notes)`,
 //! get back `(new_tree_hex, new_notes, updated_notes, nullifiers)`. Consumers
@@ -27,7 +27,7 @@ use std::io::Cursor;
 /// Depth of the Sapling commitment tree.
 pub const DEPTH: u8 = 32;
 
-/// One block's worth of shield data — raw tx bytes, keyed to a block height.
+/// One block's worth of shield data: raw tx bytes, keyed to a block height.
 #[derive(serde::Serialize, serde::Deserialize, tsify::Tsify)]
 #[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct ShieldBlock {
@@ -62,7 +62,7 @@ struct SpendableNote {
 impl SpendableNote {
     /// Move-construct from a `SerializedNote`. Takes ownership so the
     /// JSON `Value` for the note can be moved into `serde_json::from_value`
-    /// rather than cloned (the audit's H6 fix — saves one allocation per
+    /// rather than cloned (the audit's H6 fix: saves one allocation per
     /// note per `handle_blocks` call).
     fn from_serialized(n: SerializedNote) -> Result<SpendableNote, Box<dyn Error>> {
         let SerializedNote {
@@ -104,7 +104,7 @@ impl SpendableNote {
 /// cloned. Native consumers that have an owned `Vec<SerializedNote>`
 /// (e.g. removed from a wallet's note set before re-adding the
 /// updated set) save one allocation per note. Consumers that only
-/// have a slice should clone before calling — the cost is the same
+/// have a slice should clone before calling: the cost is the same
 /// either way, just relocated to the call site.
 /// Apply shield blocks to a wallet, advancing its sync cursor.
 ///
@@ -117,8 +117,8 @@ impl SpendableNote {
 /// is the visible symptom, but the damaging part is that every witness position
 /// shifts, so anchors derived from them no longer match the chain and every
 /// spend built afterwards is rejected. Because `last_block` previously only
-/// moved in `reset_to_checkpoint`, a caller syncing from `last_block + 1` — the
-/// pattern this crate's own example documents — replayed the whole range from
+/// moved in `reset_to_checkpoint`, a caller syncing from `last_block + 1`: the
+/// pattern this crate's own example documents: replayed the whole range from
 /// the checkpoint on every sync after the first.
 ///
 /// Block heights need not be contiguous. The compact stream only carries blocks
@@ -329,7 +329,7 @@ fn handle_transaction(
 /// ```
 /// Read a Bitcoin CompactSize varint at `pos`. Returns `(value, bytes_consumed)`.
 /// `< 253` is a single byte; `253`/`254`/`255` prefix a 2/4/8-byte LE value.
-/// Inverse of the bridge's encoder — the compact stream encodes the per-tx
+/// Inverse of the bridge's encoder: the compact stream encodes the per-tx
 /// spend/output counts this way so transactions with >255 spends/outputs (e.g.
 /// the 821-spend tx in mainnet block 4,465,357) aren't truncated.
 fn read_compact_size(data: &[u8], pos: usize) -> Result<(usize, usize), Box<dyn Error>> {
@@ -372,6 +372,28 @@ fn handle_compact_transaction(
     let (num_outputs, c2) = read_compact_size(payload, 1 + c1)?;
     let mut pos = 1 + c1 + c2;
 
+    // A CompactSize can declare up to u64::MAX, and the count is read before a
+    // single byte of the body it describes. Sizing a buffer from it directly is
+    // not a large allocation that fails cleanly: `Vec::with_capacity` calls
+    // `handle_alloc_error`, which **aborts** rather than unwinding, so it is
+    // not catchable, and in wasm an abort takes the whole module down. The
+    // wallet would be dead for the rest of the page's life because an RPC node
+    // returned a corrupt packet.
+    //
+    // The payload itself is the bound: the loops below need 32 bytes per spend
+    // and `OUTPUT_SIZE` per output, so a count larger than the remaining bytes
+    // can hold is a truncated or malformed packet whichever way it is read.
+    // Compared by division so the check cannot itself overflow.
+    let remaining = payload.len() - pos;
+    if num_spends > remaining / 32 {
+        return Err(format!(
+            "compact tx declares {num_spends} spends but only {remaining} bytes remain, \
+             which holds at most {}",
+            remaining / 32
+        )
+        .into());
+    }
+
     let mut nullifiers = Vec::with_capacity(num_spends);
     for _ in 0..num_spends {
         if pos + 32 > payload.len() {
@@ -390,6 +412,19 @@ fn handle_compact_transaction(
     const ENC_CT_SIZE: usize = 580;
     const OUT_CT_SIZE: usize = 80;
     const OUTPUT_SIZE: usize = 32 + 32 + 32 + ENC_CT_SIZE + OUT_CT_SIZE;
+
+    // Same bound as the spend count above. This loop allocates per iteration
+    // rather than up front, so an inflated count costs time rather than an
+    // abort, but it is the same malformed packet and deserves the same answer.
+    let remaining = payload.len() - pos;
+    if num_outputs > remaining / OUTPUT_SIZE {
+        return Err(format!(
+            "compact tx declares {num_outputs} outputs but only {remaining} bytes remain, \
+             which holds at most {}",
+            remaining / OUTPUT_SIZE
+        )
+        .into());
+    }
 
     for _ in 0..num_outputs {
         if pos + OUTPUT_SIZE > payload.len() {

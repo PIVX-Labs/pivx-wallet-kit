@@ -54,7 +54,7 @@ fn single_recipient_shape_matches_the_previous_hardcoded_values() {
 }
 
 /// Sapling output count is `shield recipients + 1` for change. The floor of 2
-/// only binds for a single shield recipient — beyond that the real count takes
+/// only binds for a single shield recipient: beyond that the real count takes
 /// over.
 #[test]
 fn sapling_output_count_grows_with_shield_recipients() {
@@ -87,7 +87,7 @@ fn transparent_recipients_count_separately() {
 
     let (t, s, total) = shield_recipient_fee_shape(&recipients).unwrap();
     assert_eq!(t, 3, "three transparent outputs expected");
-    // No shield recipients, so only the change note — floored at 2.
+    // No shield recipients, so only the change note: floored at 2.
     assert_eq!(s, 2);
     assert_eq!(total, 30_000);
 }
@@ -109,7 +109,7 @@ fn mixed_pools_in_one_transaction() {
     assert_eq!(total, 100_000);
 }
 
-/// A fee quoted for a bigger send must never come out below a smaller one —
+/// A fee quoted for a bigger send must never come out below a smaller one:
 /// the property that actually protects against stranded transactions.
 #[test]
 fn fee_is_monotonic_in_recipient_count() {
@@ -143,7 +143,7 @@ fn rejects_zero_amount() {
 }
 
 /// A memo on a transparent output has nowhere to go. Erroring is the honest
-/// behaviour — silently dropping it would let a caller believe a payment
+/// behaviour: silently dropping it would let a caller believe a payment
 /// carried a reference it does not.
 #[test]
 fn rejects_memo_on_a_transparent_recipient() {
@@ -168,7 +168,7 @@ fn rejects_memo_on_a_transparent_recipient() {
 }
 
 /// A Sapling memo field is 512 bytes. Over-long memos must be rejected during
-/// recipient resolution, not deep inside the builder — otherwise the fee
+/// recipient resolution, not deep inside the builder: otherwise the fee
 /// estimator quotes a fee for a send that cannot be built, breaking the
 /// estimator/builder agreement the rest of this module maintains.
 #[test]

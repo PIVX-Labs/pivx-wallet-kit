@@ -71,7 +71,7 @@ jobs:
       # Regression gate for the 0.2.3 hang: rayon reaching the default wasm
       # artifact means every shield proof spins at 100% CPU forever, because
       # there are no worker threads for it to wait on. A `cargo build` alone
-      # does NOT catch this — the broken artifact compiles perfectly and only
+      # does NOT catch this: the broken artifact compiles perfectly and only
       # hangs at runtime, which is how 0.2.3 shipped to npm.
       #
       # Checking the built binary rather than `cargo tree` is deliberate:
@@ -88,18 +88,18 @@ jobs:
           # Prove `strings` is actually reading symbol data before trusting a
           # zero rayon count. `wasm-opt` already strips the name section, and a
           # future build tightening that further would leave `grep -c rayon`
-          # returning 0 because there is nothing to search — the gate would keep
+          # returning 0 because there is nothing to search: the gate would keep
           # passing while checking nothing. Known proving symbols must be
           # present for the absence of rayon to mean anything.
           SENTINEL=$(strings -a "$WASM" | grep -c -e groth16 -e bellman -e sapling || true)
           if [ "$SENTINEL" -eq 0 ]; then
             echo "::error::No known proving symbols found in $WASM."
             echo "Either this is not a real proving build, or the binary no longer"
-            echo "carries readable symbols — in which case the rayon check below"
+            echo "carries readable symbols: in which case the rayon check below"
             echo "would pass vacuously and must not be trusted."
             exit 1
           fi
-          echo "Sentinel: $SENTINEL proving symbol reference(s) — strings is reading real data."
+          echo "Sentinel: $SENTINEL proving symbol reference(s): strings is reading real data."
 
           COUNT=$(strings -a "$WASM" | grep -c rayon || true)
           if [ "$COUNT" -ne 0 ]; then

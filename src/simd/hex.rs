@@ -499,7 +499,7 @@ pub fn bytes_to_hex_string(bytes: &[u8]) -> String {
 /// nibble (e.g. `"abc"` → `[0xab]`, not `[0xab, 0x0c]`). PIVX wire formats
 /// produce even-length hex by construction (32-byte nullifiers, witnesses,
 /// commitment trees, etc.), so internal callers are safe. External
-/// hex coming off the network goes through this same function — keep
+/// hex coming off the network goes through this same function: keep
 /// that in mind if you ever ingest hex from an untrusted source. Debug
 /// builds assert against odd-length input to catch the case during dev.
 #[allow(clippy::uninit_vec)] // SIMD paths write every byte before the buffer is read

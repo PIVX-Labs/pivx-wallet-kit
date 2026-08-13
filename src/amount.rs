@@ -6,7 +6,7 @@ use crate::params::COIN;
 
 /// Parse a PIV amount string (e.g. `"1.23456789"`) into satoshis.
 ///
-/// Uses exact integer arithmetic — no floating point conversion — so round-trip
+/// Uses exact integer arithmetic (no floating point conversion), so round-trip
 /// parsing preserves every satoshi. Maximum 8 decimal places; more returns an error.
 pub fn parse_piv_to_sat(s: &str) -> Result<u64, String> {
     let s = s.trim();
