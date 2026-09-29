@@ -31,8 +31,9 @@
 /// **actual** total size on the node's side, every byte this model
 /// under-estimates costs 1000 sat rather than 10. The transparent path has
 /// `tests/fee_covers_relay_minimum.rs` proving its model covers real serialized
-/// bytes; the shielded path has no equivalent, and that gap matters a hundred
-/// times more here.
+/// bytes; `tests/shield_fee_covers_size.rs` is the shielded equivalent, pinned
+/// against a real mainnet transaction, and it matters a hundred times more
+/// here.
 ///
 /// Core also caps the fee at `GetShieldedTxMinFee(tx) * 100`, so a wildly
 /// over-paying shielded transaction is refused too: this is a window, not a
