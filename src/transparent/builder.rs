@@ -494,7 +494,14 @@ fn reject_foreign_slot_utxos(
         if u.script.is_empty() {
             continue;
         }
-        let script = crate::simd::hex::hex_string_to_bytes(&u.script);
+        // Sanitized: this string can come straight from a JS caller via
+        // `setUtxos`, and an unchecked decode of odd-length hex silently
+        // truncates rather than failing.
+        let hex = crate::wallet::sanitize_script_hex(&u.script);
+        if hex.is_empty() {
+            continue;
+        }
+        let script = crate::simd::hex::hex_string_to_bytes(&hex);
         if script == own_script {
             continue;
         }

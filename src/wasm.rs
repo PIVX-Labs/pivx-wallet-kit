@@ -531,7 +531,20 @@ impl Wallet {
     /// through, which takes a second explorer call; see `parseBlockbookUtxos`.
     #[wasm_bindgen(js_name = setUtxos)]
     pub fn set_utxos(&mut self, utxos: UtxosInput) {
-        self.inner.unspent_utxos = utxos.utxos;
+        // These entries come straight from JS, so `script` has not been through
+        // `parseBlockbookUtxos`'s validation: cold-staking consumers are told
+        // to join it on themselves from a second explorer call. Malformed hex
+        // reaching the P2CS classifier would be decoded by an unchecked SIMD
+        // decoder that truncates odd lengths rather than failing, so it is
+        // reduced to "unknown" at the door instead.
+        let mut utxos = utxos.utxos;
+        for u in &mut utxos {
+            let clean = crate::wallet::sanitize_script_hex(&u.script);
+            if clean != u.script {
+                u.script = clean;
+            }
+        }
+        self.inner.unspent_utxos = utxos;
     }
 
     /// Sign an arbitrary message with the wallet's transparent key.
