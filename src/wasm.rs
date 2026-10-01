@@ -406,7 +406,8 @@ impl Wallet {
     ///
     /// ```js
     /// const max = wallet.maxSendableSat(destination);
-    /// if (max === 0n) { /* nothing sendable: disable the control */ }
+    /// // nothing sendable: disable the control
+    /// if (max === 0n) { sendButton.disabled = true; }
     /// else { amountField.value = formatSatToPiv(max); }
     /// ```
     ///
