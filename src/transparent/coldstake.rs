@@ -620,7 +620,10 @@ pub fn create_coldstake_withdrawal_with_change(
             )
             .into());
         }
-        let script = crate::simd::hex::hex_string_to_bytes(&utxo.script);
+        // Sanitized: see `wallet::sanitize_script_hex`. A truncated script
+        // here would be parsed as a different delegation.
+        let script =
+            crate::simd::hex::hex_string_to_bytes(&crate::wallet::sanitize_script_hex(&utxo.script));
         let hashes = parse_p2cs_script(&script).map_err(|e| {
             format!("UTXO {}:{} (input {i}) is not a delegated output: {e}", utxo.txid, utxo.vout)
         })?;

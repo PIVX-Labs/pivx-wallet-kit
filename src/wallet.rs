@@ -167,10 +167,15 @@ impl SerializedUTXO {
 /// that preserves existing behaviour, at the cost of the hazard documented on
 /// [`WalletData::get_transparent_balance`].
 pub fn is_delegated_utxo(utxo: &SerializedUTXO) -> bool {
-    if utxo.script.is_empty() {
+    // Sanitized rather than trusted: this classification decides whether an
+    // output is excluded from ordinary spending, and it runs on a string a JS
+    // caller may have set directly through `setUtxos`. Malformed hex reads as
+    // "unknown", the same as absent.
+    let hex = sanitize_script_hex(&utxo.script);
+    if hex.is_empty() {
         return false;
     }
-    crate::transparent::coldstake::is_p2cs(&crate::simd::hex::hex_string_to_bytes(&utxo.script))
+    crate::transparent::coldstake::is_p2cs(&crate::simd::hex::hex_string_to_bytes(&hex))
 }
 
 /// The hex `scriptPubKey` carried on a UTXO entry, or empty if absent or
@@ -189,11 +194,25 @@ fn utxo_script_hex(u: &serde_json::Value) -> String {
         .or_else(|| u["hex"].as_str())
         .unwrap_or_default();
 
-    // `hex_string_to_bytes` is an unchecked SIMD decoder: an odd length drops a
-    // trailing nibble and a non-hex byte decodes to garbage, neither loudly. A
-    // malformed script that reached `is_delegated_utxo` would be classified on
-    // that garbage, so it is dropped to empty here instead, which reads as
-    // "unknown" and is the direction that stays safe.
+    sanitize_script_hex(raw)
+}
+
+/// Reduce a caller-supplied `scriptPubKey` hex string to something safe to
+/// decode, or to empty.
+///
+/// `hex_string_to_bytes` is an unchecked SIMD decoder: an odd length drops a
+/// trailing nibble and a non-hex byte decodes to garbage, neither loudly (and
+/// its debug assertion aborts instead). A malformed script that reached
+/// [`is_delegated_utxo`] would be classified on that garbage, so it is dropped
+/// to empty here, which reads as "unknown" and is the direction that stays
+/// safe.
+///
+/// This lives apart from [`utxo_script_hex`] because the JSON parser is not the
+/// only way a script arrives. `Wallet::setUtxos` takes entries straight from a
+/// JS caller, and cold-staking consumers are specifically told to join `script`
+/// on themselves from a second explorer call, which never passes through the
+/// parser here. One definition, applied at both doors.
+pub fn sanitize_script_hex(raw: &str) -> String {
     if raw.is_empty() || !raw.len().is_multiple_of(2) || !raw.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return String::new();
