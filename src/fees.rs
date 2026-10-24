@@ -1,6 +1,7 @@
 //! Component-based fee estimation for PIVX transactions.
 
-/// Estimate the fee (in satoshis) for a transaction by component count.
+/// Estimate the fee (in satoshis) for a shielded (v3) transaction by component
+/// count.
 ///
 /// Flat rate of 1000 sat/byte applied to a conservative size model:
 /// - 948 bytes per Sapling output
@@ -8,6 +9,35 @@
 /// - 180 bytes per transparent input (signed P2PKH)
 /// - 34 bytes per transparent output
 /// - 100 bytes of transaction overhead
+///
+/// **The 1000 is network-enforced, not a safety margin.** PIVX charges shielded
+/// transactions one hundred times the ordinary relay minimum, in
+/// `GetShieldedTxMinFee` (`src/validation.cpp`):
+///
+/// ```text
+/// unsigned int K = DEFAULT_SHIELDEDTXFEE_K;   // Fixed (100) for now
+/// CAmount nMinFee = ::minRelayTxFee.GetFee(tx.GetTotalSize()) * K;
+/// ```
+///
+/// with `DEFAULT_SHIELDEDTXFEE_K = 100` (`src/validation.h`) and
+/// `minRelayTxFee = CFeeRate(10000)`, which is 10 sat/byte. So 10 * 100 = 1000,
+/// exactly. Do not "optimise" this down to the transparent rate: a shielded
+/// transaction paying 10 sat/byte is rejected outright.
+///
+/// The figure looks like a hundredfold over-charge next to
+/// [`estimate_raw_transparent_fee`], and was once reported as one. It is not.
+///
+/// One consequence deserves attention: because the rate is multiplied by
+/// **actual** total size on the node's side, every byte this model
+/// under-estimates costs 1000 sat rather than 10. The transparent path has
+/// `tests/fee_covers_relay_minimum.rs` proving its model covers real serialized
+/// bytes; `tests/shield_fee_covers_size.rs` is the shielded equivalent, pinned
+/// against a real mainnet transaction, and it matters a hundred times more
+/// here.
+///
+/// Core also caps the fee at `GetShieldedTxMinFee(tx) * 100`, so a wildly
+/// over-paying shielded transaction is refused too: this is a window, not a
+/// floor.
 #[inline]
 pub fn estimate_fee(
     transparent_input_count: u64,

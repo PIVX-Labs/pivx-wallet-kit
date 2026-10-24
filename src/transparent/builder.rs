@@ -384,8 +384,11 @@ pub fn max_shieldable_transparent(wallet: &WalletData) -> u64 {
     let Some(total) = utxos.iter().try_fold(0u64, |a, u| a.checked_add(u.amount)) else {
         return 0;
     };
-    // Matches `create_shielding_transaction`: 0 transparent outputs, 2 sapling.
-    let fee = fees::estimate_fee(utxos.len() as u64, 0, 0, 2);
+    // Must match `create_shielding_transaction`'s model exactly: 1 transparent
+    // output for change, 2 sapling. If this quotes a smaller fee than the
+    // builder charges, the figure it returns is not buildable, which is the
+    // one thing a "max" accessor must never do.
+    let fee = fees::estimate_fee(utxos.len() as u64, 1, 0, 2);
     total.saturating_sub(fee)
 }
 
@@ -591,9 +594,23 @@ pub fn create_shielding_transaction(
         return Err(no_spendable_utxos_error(wallet));
     }
 
-    // Shield dest: 0 transparent outs, 2 sapling outs (destination + change-back-to-self would
-    // need a shield change address, but currently change goes back as transparent).
-    let transparent_output_count: u64 = 0;
+    // Shield dest: 2 sapling outs (the destination plus the padding output the
+    // builder adds so a single-output shape is not leaked), and 1 transparent
+    // out for change, which is emitted below whenever `change > 0`.
+    //
+    // That transparent output used to be counted as 0. The transaction emitted
+    // it anyway, and the estimate survived only because the other allowances
+    // are generous: measured against a real mainnet shielding transaction
+    // (4cd0838d, 2162 bytes) the model came to 2176, so 14 bytes of margin
+    // absorbed a 34-byte output it had not budgeted for. At the shielded rate
+    // of 1000 sat/byte that margin is worth 14,000 sat and rests on the input
+    // allowance over-estimating by ~33 bytes, which is luck rather than
+    // design.
+    //
+    // Counting it is the safe direction: assuming change up front can only
+    // over-estimate, exactly as `select_transparent_utxos` already does on the
+    // transparent path.
+    let transparent_output_count: u64 = 1;
     let sapling_output_count: u64 = 2;
 
     let mut selected: Vec<SerializedUTXO> = Vec::new();
