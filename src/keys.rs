@@ -246,6 +246,34 @@ pub fn pubkey_to_pivx_address(pubkey: &[u8]) -> String {
     bs58::encode(&payload).into_string()
 }
 
+/// Longest input to attempt Base58 decoding.
+///
+/// A 25-byte payload encodes to 34 characters, and leading zero bytes add one
+/// character each, so 64 leaves a wide margin over anything real while keeping
+/// the quadratic decode bounded to a trivial cost.
+const MAX_BASE58_ADDRESS_LEN: usize = 64;
+
+/// Refuse an address too long to be Base58Check, before anything decodes it.
+///
+/// Length is checked before decoding, not after, because Base58 decoding is
+/// quadratic in the input: every digit multiplies a growing big-integer
+/// accumulator. A 100,000-character string is ~10^10 operations and takes the
+/// better part of a minute, which is a denial of service on a function
+/// reachable from an address text field. The real thing is 25 bytes, so
+/// anything past a generous ceiling cannot become a valid address however long
+/// it is decoded for.
+pub(crate) fn refuse_overlong_base58(address: &str) -> Result<(), Box<dyn Error>> {
+    if address.len() > MAX_BASE58_ADDRESS_LEN {
+        return Err(format!(
+            "Address is {} characters, far past the {MAX_BASE58_ADDRESS_LEN} a Base58Check \
+             address can be: refusing to decode it.",
+            address.len()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Decode any PIVX address into a `GenericAddress` (shield or transparent).
 pub fn decode_generic_address(address: &str) -> Result<GenericAddress, Box<dyn Error>> {
     if address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
@@ -254,6 +282,7 @@ pub fn decode_generic_address(address: &str) -> Result<GenericAddress, Box<dyn E
                 .map_err(|_| "Failed to decode shield address")?;
         Ok(GenericAddress::Shield(addr))
     } else {
+        refuse_overlong_base58(address)?;
         let addr = decode_transparent_address(
             &MAIN_NETWORK.b58_pubkey_address_prefix(),
             &MAIN_NETWORK.b58_script_address_prefix(),
@@ -285,6 +314,7 @@ pub fn decode_generic_address(address: &str) -> Result<GenericAddress, Box<dyn E
 /// P2PKH by construction, so it refuses anything else rather than silently
 /// mislabelling it.
 pub fn address_to_p2pkh_script(address: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    refuse_overlong_base58(address)?;
     let decoded = bs58::decode(address)
         .into_vec()
         .map_err(|e| format!("Invalid base58 address: {e}"))?;

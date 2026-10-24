@@ -153,6 +153,7 @@ pub struct ColdStakeHashes {
 fn decode_checked(address: &str) -> Result<(u8, [u8; 20]), Box<dyn Error>> {
     use sha2::{Digest, Sha256};
 
+    crate::keys::refuse_overlong_base58(address)?;
     let decoded = bs58::decode(address)
         .into_vec()
         .map_err(|e| format!("Invalid base58 address: {e}"))?;
