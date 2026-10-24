@@ -1,4 +1,4 @@
-//! PIVX Wallet Kit — pure-Rust wallet primitives with Sapling shield support.
+//! PIVX Wallet Kit: pure-Rust wallet primitives with Sapling shield support.
 //!
 //! No I/O, no network, no filesystem. Compiles to native, WASM, and mobile.
 //!

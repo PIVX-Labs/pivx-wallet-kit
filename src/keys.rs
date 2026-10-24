@@ -62,7 +62,7 @@ pub fn get_default_address(enc_extfvk: &str) -> Result<String, Box<dyn Error>> {
 /// diversifier is an 11-byte value derived from a diversifier *index*. All
 /// addresses produced from the same extfvk decrypt to the same spending
 /// key, so an unlimited number of distinct receive addresses can be issued
-/// without the wallet needing to track multiple secrets — exactly what the
+/// without the wallet needing to track multiple secrets: exactly what the
 /// merchant flow wants (one address per invoice).
 ///
 /// Not every index produces a valid diversifier (~50% are rejected by the
@@ -84,13 +84,13 @@ pub fn shield_address_at(
     let start: DiversifierIndex = DiversifierIndex::from(start_index);
     let (idx, address) = dfvk
         .find_address(start)
-        .ok_or("no valid diversifier found beyond start_index — exhausted the diversifier space")?;
+        .ok_or("no valid diversifier found beyond start_index: exhausted the diversifier space")?;
     // The diversifier index is an 11-byte value but for invoice-counter use
     // cases we always pass `u32` in, so a `u32` round-trip is guaranteed
     // unless a caller deliberately exceeded u32::MAX. Surface that as an
     // error rather than silently truncating.
     let used = u32::try_from(idx).map_err(|_| {
-        "diversifier index overflowed u32 — caller's start_index was too close to u32::MAX"
+        "diversifier index overflowed u32: caller's start_index was too close to u32::MAX"
     })?;
     Ok((used, encode_payment_address(&address)))
 }
@@ -144,7 +144,7 @@ pub fn encode_payment_address(addr: &PaymentAddress) -> String {
 #[allow(clippy::type_complexity)] // Tuple return is a documented stable shape; refactor tracked as an ergonomics concern
 /// Derive a BIP44 transparent key triple at `m/44'/119'/0'/{change}/{index}`.
 ///
-/// The privkey is returned wrapped in [`Zeroizing`] — it'll wipe its 32-byte
+/// The privkey is returned wrapped in [`Zeroizing`]: it'll wipe its 32-byte
 /// buffer when the caller drops it. Callers that need to copy the bytes into
 /// another secret-bearing struct should do so via the deref (`&*privkey` or
 /// `privkey.as_slice()`); copies into non-zeroizing containers re-introduce
@@ -154,6 +154,9 @@ pub fn transparent_key_from_bip39_seed(
     change: u32,
     index: u32,
 ) -> Result<(String, Vec<u8>, Zeroizing<Vec<u8>>), Box<dyn Error>> {
+    check_child_number("change", change)?;
+    check_child_number("index", index)?;
+
     let path: DerivationPath = format!("m/44'/{}'/0'/{}/{}", PIVX_COIN_TYPE, change, index)
         .parse()
         .map_err(|e| format!("Invalid derivation path: {e}"))?;
@@ -168,6 +171,53 @@ pub fn transparent_key_from_bip39_seed(
     let address = pubkey_to_pivx_address(&pubkey_bytes);
 
     Ok((address, pubkey_bytes.to_vec(), privkey_bytes))
+}
+
+/// Largest BIP32 child number that is not hardened.
+///
+/// The child number's high bit *is* the hardened flag, so the non-hardened half
+/// of the space ends here. The last two levels of a BIP44 path are non-hardened
+/// by definition (that is what lets a watch-only xpub derive them), so this is
+/// the ceiling on both `change` and `index`.
+const MAX_NON_HARDENED_CHILD: u32 = 0x7fff_ffff;
+
+/// Reject a child number the high bit of which would silently mean "hardened".
+///
+/// The `bip32` crate rejects these too, but as `invalid child number` from
+/// inside a path parse, which reads as a bug in the kit rather than as a
+/// caller's counter having run off the end. A rotating consumer allocating one
+/// slot per invoice is the only party who can reach it, so it says so.
+fn check_child_number(what: &str, n: u32) -> Result<(), Box<dyn Error>> {
+    if n > MAX_NON_HARDENED_CHILD {
+        return Err(format!(
+            "HD {what} {n} is out of range: BIP32 non-hardened child numbers stop at \
+             {MAX_NON_HARDENED_CHILD}, because the high bit selects hardened derivation. \
+             A consumer rotating addresses should move to the next `change` level rather \
+             than push `index` past this."
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Derive the transparent (`D...`) address at `m/44'/119'/0'/change/index`.
+///
+/// The counterpart to
+/// [`crate::transparent::coldstake::owner_hash_from_seed`], which produced the
+/// same key's `S...` form: a consumer could get the staking address for any
+/// slot but only the `0/0` transparent one, which is the wrong way round for
+/// address rotation (one address per invoice, per customer, per anything).
+///
+/// The private key is derived and dropped here, since only the address is
+/// wanted. [`Zeroizing`] wipes it on the way out.
+pub fn transparent_address_at(
+    bip39_seed: &[u8],
+    change: u32,
+    index: u32,
+) -> Result<String, Box<dyn Error>> {
+    let (address, _pubkey, _privkey) =
+        transparent_key_from_bip39_seed(bip39_seed, change, index)?;
+    Ok(address)
 }
 
 /// Get the default transparent address from a mnemonic string.
@@ -196,6 +246,34 @@ pub fn pubkey_to_pivx_address(pubkey: &[u8]) -> String {
     bs58::encode(&payload).into_string()
 }
 
+/// Longest input to attempt Base58 decoding.
+///
+/// A 25-byte payload encodes to 34 characters, and leading zero bytes add one
+/// character each, so 64 leaves a wide margin over anything real while keeping
+/// the quadratic decode bounded to a trivial cost.
+const MAX_BASE58_ADDRESS_LEN: usize = 64;
+
+/// Refuse an address too long to be Base58Check, before anything decodes it.
+///
+/// Length is checked before decoding, not after, because Base58 decoding is
+/// quadratic in the input: every digit multiplies a growing big-integer
+/// accumulator. A 100,000-character string is ~10^10 operations and takes the
+/// better part of a minute, which is a denial of service on a function
+/// reachable from an address text field. The real thing is 25 bytes, so
+/// anything past a generous ceiling cannot become a valid address however long
+/// it is decoded for.
+pub(crate) fn refuse_overlong_base58(address: &str) -> Result<(), Box<dyn Error>> {
+    if address.len() > MAX_BASE58_ADDRESS_LEN {
+        return Err(format!(
+            "Address is {} characters, far past the {MAX_BASE58_ADDRESS_LEN} a Base58Check \
+             address can be: refusing to decode it.",
+            address.len()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Decode any PIVX address into a `GenericAddress` (shield or transparent).
 pub fn decode_generic_address(address: &str) -> Result<GenericAddress, Box<dyn Error>> {
     if address.starts_with(MAIN_NETWORK.hrp_sapling_payment_address()) {
@@ -204,6 +282,7 @@ pub fn decode_generic_address(address: &str) -> Result<GenericAddress, Box<dyn E
                 .map_err(|_| "Failed to decode shield address")?;
         Ok(GenericAddress::Shield(addr))
     } else {
+        refuse_overlong_base58(address)?;
         let addr = decode_transparent_address(
             &MAIN_NETWORK.b58_pubkey_address_prefix(),
             &MAIN_NETWORK.b58_script_address_prefix(),
@@ -231,10 +310,11 @@ pub fn decode_generic_address(address: &str) -> Result<GenericAddress, Box<dyn E
 ///    *public key* whose hash matches, which no script hash will ever be.
 ///    Addresses from other networks are rejected for the same reason.
 ///
-/// Callers that need P2SH support want a separate script builder — this one is
+/// Callers that need P2SH support want a separate script builder: this one is
 /// P2PKH by construction, so it refuses anything else rather than silently
 /// mislabelling it.
 pub fn address_to_p2pkh_script(address: &str) -> Result<Vec<u8>, Box<dyn Error>> {
+    refuse_overlong_base58(address)?;
     let decoded = bs58::decode(address)
         .into_vec()
         .map_err(|e| format!("Invalid base58 address: {e}"))?;
@@ -252,14 +332,14 @@ pub fn address_to_p2pkh_script(address: &str) -> Result<Vec<u8>, Box<dyn Error>>
     let expected = Sha256::digest(Sha256::digest(payload));
     if expected[..4] != checksum[..] {
         return Err(format!(
-            "Invalid address checksum for {address} — the address is mistyped or corrupted"
+            "Invalid address checksum for {address}: the address is mistyped or corrupted"
         )
         .into());
     }
 
     if payload[0] != PIVX_PUBKEY_PREFIX {
         return Err(format!(
-            "Address {address} has version byte {} — not a PIVX transparent (P2PKH) address, \
+            "Address {address} has version byte {}, not a PIVX transparent (P2PKH) address, \
              which uses {PIVX_PUBKEY_PREFIX}. Paying it as P2PKH would create an unspendable \
              output.",
             payload[0]

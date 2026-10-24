@@ -1,6 +1,6 @@
 //! Signature-level verification for the raw v1 transparent builders.
 //!
-//! The existing integration tests assert on transaction *shape* — hex is
+//! The existing integration tests assert on transaction *shape*: hex is
 //! non-empty, version bytes are right, a script appears somewhere in the body.
 //! None of them check that the ECDSA signatures actually commit to the
 //! transaction that was built. That gap matters because the transparent path
@@ -16,9 +16,12 @@
 //!
 //! So these tests re-derive everything from the finished transaction bytes and
 //! never call the builder's own hashing code. The prevout script is
-//! reconstructed from the pubkey inside each `scriptSig` — exactly the
-//! information a node has — which means a bug in `compute_sighash` cannot hide
+//! reconstructed from the pubkey inside each `scriptSig`: exactly the
+//! information a node has, which means a bug in `compute_sighash` cannot hide
 //! by being reused on both sides of the comparison.
+
+mod common;
+use common::{decode as parse_tx, verify_all_signatures};
 
 use pivx_wallet_kit::keys;
 use pivx_wallet_kit::simd;
@@ -27,245 +30,9 @@ use pivx_wallet_kit::transparent::builder::{
     create_raw_transparent_transaction_from_utxos_to_many,
 };
 use pivx_wallet_kit::wallet::SerializedUTXO;
-use ripemd::Ripemd160;
-use sha2::{Digest, Sha256};
 
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-
-// ---------------------------------------------------------------------------
-// Minimal legacy transaction parser
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-struct TxIn {
-    prev_txid: [u8; 32],
-    prev_vout: u32,
-    script_sig: Vec<u8>,
-    sequence: u32,
-}
-
-#[derive(Debug)]
-struct TxOut {
-    value: u64,
-    script_pubkey: Vec<u8>,
-}
-
-#[derive(Debug)]
-struct Tx {
-    version: u32,
-    inputs: Vec<TxIn>,
-    outputs: Vec<TxOut>,
-    locktime: u32,
-}
-
-struct Cursor<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Cursor { bytes, pos: 0 }
-    }
-
-    fn take(&mut self, n: usize) -> &'a [u8] {
-        assert!(
-            self.pos + n <= self.bytes.len(),
-            "truncated transaction: wanted {} bytes at offset {}, only {} remain",
-            n,
-            self.pos,
-            self.bytes.len() - self.pos
-        );
-        let out = &self.bytes[self.pos..self.pos + n];
-        self.pos += n;
-        out
-    }
-
-    fn u32_le(&mut self) -> u32 {
-        u32::from_le_bytes(self.take(4).try_into().unwrap())
-    }
-
-    fn u64_le(&mut self) -> u64 {
-        u64::from_le_bytes(self.take(8).try_into().unwrap())
-    }
-
-    fn varint(&mut self) -> u64 {
-        let first = self.take(1)[0];
-        match first {
-            0xfd => u16::from_le_bytes(self.take(2).try_into().unwrap()) as u64,
-            0xfe => u32::from_le_bytes(self.take(4).try_into().unwrap()) as u64,
-            0xff => u64::from_le_bytes(self.take(8).try_into().unwrap()),
-            n => n as u64,
-        }
-    }
-}
-
-fn parse_tx(bytes: &[u8]) -> Tx {
-    let mut c = Cursor::new(bytes);
-    let version = c.u32_le();
-
-    let n_in = c.varint();
-    let mut inputs = Vec::with_capacity(n_in as usize);
-    for _ in 0..n_in {
-        let prev_txid: [u8; 32] = c.take(32).try_into().unwrap();
-        let prev_vout = c.u32_le();
-        let script_len = c.varint() as usize;
-        let script_sig = c.take(script_len).to_vec();
-        let sequence = c.u32_le();
-        inputs.push(TxIn { prev_txid, prev_vout, script_sig, sequence });
-    }
-
-    let n_out = c.varint();
-    let mut outputs = Vec::with_capacity(n_out as usize);
-    for _ in 0..n_out {
-        let value = c.u64_le();
-        let script_len = c.varint() as usize;
-        let script_pubkey = c.take(script_len).to_vec();
-        outputs.push(TxOut { value, script_pubkey });
-    }
-
-    let locktime = c.u32_le();
-
-    assert_eq!(
-        c.pos,
-        bytes.len(),
-        "transaction has {} trailing byte(s) after locktime — serializer wrote more than it \
-         accounted for",
-        bytes.len() - c.pos
-    );
-
-    Tx { version, inputs, outputs, locktime }
-}
-
-// ---------------------------------------------------------------------------
-// Independent SIGHASH_ALL reconstruction
-// ---------------------------------------------------------------------------
-
-fn write_varint(out: &mut Vec<u8>, n: u64) {
-    match n {
-        0..=0xfc => out.push(n as u8),
-        0xfd..=0xffff => {
-            out.push(0xfd);
-            out.extend_from_slice(&(n as u16).to_le_bytes());
-        }
-        0x10000..=0xffff_ffff => {
-            out.push(0xfe);
-            out.extend_from_slice(&(n as u32).to_le_bytes());
-        }
-        _ => {
-            out.push(0xff);
-            out.extend_from_slice(&n.to_le_bytes());
-        }
-    }
-}
-
-/// Rebuild the SIGHASH_ALL preimage for `signing_index` from the parsed
-/// transaction, per the legacy Bitcoin rules PIVX inherits: the input being
-/// signed carries the prevout's `scriptPubKey`, every other input carries an
-/// empty script, and the whole thing is committed to along with all outputs.
-///
-/// Deliberately reimplemented here rather than calling the builder's
-/// `compute_sighash`, so the two can actually disagree.
-fn sighash_all(tx: &Tx, signing_index: usize, prevout_script: &[u8]) -> [u8; 32] {
-    let mut pre = Vec::new();
-    pre.extend_from_slice(&tx.version.to_le_bytes());
-
-    write_varint(&mut pre, tx.inputs.len() as u64);
-    for (i, input) in tx.inputs.iter().enumerate() {
-        pre.extend_from_slice(&input.prev_txid);
-        pre.extend_from_slice(&input.prev_vout.to_le_bytes());
-        if i == signing_index {
-            write_varint(&mut pre, prevout_script.len() as u64);
-            pre.extend_from_slice(prevout_script);
-        } else {
-            pre.push(0x00);
-        }
-        pre.extend_from_slice(&input.sequence.to_le_bytes());
-    }
-
-    write_varint(&mut pre, tx.outputs.len() as u64);
-    for output in &tx.outputs {
-        pre.extend_from_slice(&output.value.to_le_bytes());
-        write_varint(&mut pre, output.script_pubkey.len() as u64);
-        pre.extend_from_slice(&output.script_pubkey);
-    }
-
-    pre.extend_from_slice(&tx.locktime.to_le_bytes());
-    pre.extend_from_slice(&1u32.to_le_bytes()); // SIGHASH_ALL
-
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&Sha256::digest(Sha256::digest(&pre)));
-    out
-}
-
-/// Split a P2PKH `scriptSig` into its DER signature (sighash byte stripped)
-/// and pubkey. Layout: `<push sig+type> <sig..> <hashtype> <push pubkey> <pubkey..>`.
-fn split_script_sig(script_sig: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let sig_push = script_sig[0] as usize;
-    assert!(sig_push > 0 && sig_push < 0x4c, "unexpected signature push opcode");
-    let sig_with_type = &script_sig[1..1 + sig_push];
-    let (sig_der, hash_type) = sig_with_type.split_at(sig_with_type.len() - 1);
-    assert_eq!(hash_type[0], 0x01, "expected SIGHASH_ALL (0x01)");
-
-    let key_off = 1 + sig_push;
-    let key_push = script_sig[key_off] as usize;
-    let pubkey = &script_sig[key_off + 1..key_off + 1 + key_push];
-    assert_eq!(
-        key_off + 1 + key_push,
-        script_sig.len(),
-        "trailing bytes after pubkey in scriptSig"
-    );
-
-    (sig_der.to_vec(), pubkey.to_vec())
-}
-
-/// P2PKH `scriptPubKey` for a pubkey: OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG.
-fn p2pkh_script_from_pubkey(pubkey: &[u8]) -> Vec<u8> {
-    let sha = Sha256::digest(pubkey);
-    let pkh = Ripemd160::digest(sha);
-    let mut script = vec![0x76, 0xa9, 0x14];
-    script.extend_from_slice(&pkh);
-    script.push(0x88);
-    script.push(0xac);
-    script
-}
-
-/// Verify every input's signature against a sighash rebuilt from the finished
-/// transaction. Returns the number of inputs verified.
-///
-/// This is the assertion that actually matters: it fails if the preimage the
-/// builder signed differs in any byte from the transaction it emitted.
-fn verify_all_signatures(tx: &Tx) -> usize {
-    let secp = secp256k1::Secp256k1::verification_only();
-
-    for (i, input) in tx.inputs.iter().enumerate() {
-        let (sig_der, pubkey_bytes) = split_script_sig(&input.script_sig);
-
-        // A node knows the prevout script because it has the funding output.
-        // For P2PKH it is fully determined by the pubkey being presented, so
-        // we can reconstruct it without trusting anything the builder told us.
-        let prevout_script = p2pkh_script_from_pubkey(&pubkey_bytes);
-
-        let sighash = sighash_all(tx, i, &prevout_script);
-        let msg = secp256k1::Message::from_digest(sighash);
-        let sig = secp256k1::ecdsa::Signature::from_der(&sig_der)
-            .unwrap_or_else(|e| panic!("input {i}: malformed DER signature: {e}"));
-        let pubkey = secp256k1::PublicKey::from_slice(&pubkey_bytes)
-            .unwrap_or_else(|e| panic!("input {i}: malformed pubkey: {e}"));
-
-        secp.verify_ecdsa(&msg, &sig, &pubkey).unwrap_or_else(|e| {
-            panic!(
-                "input {i}: SIGNATURE DOES NOT COMMIT TO THIS TRANSACTION ({e}).\n\
-                 The signed preimage and the serialized transaction disagree — this tx \
-                 would be rejected by the network, or (worse) a serialization bug is \
-                 paying outputs the signature never authorised."
-            )
-        });
-    }
-
-    tx.inputs.len()
-}
 
 fn seed() -> Vec<u8> {
     bip39::Mnemonic::parse_normalized(TEST_MNEMONIC)
@@ -281,6 +48,7 @@ fn utxo(txid_byte: &str, vout: u32, amount: u64) -> SerializedUTXO {
         amount,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }
 }
 
@@ -384,7 +152,7 @@ fn every_input_signature_is_independently_valid() {
 }
 
 /// Negative control. The verifier must actually reject a transaction whose
-/// outputs were altered after signing — otherwise the tests above prove
+/// outputs were altered after signing: otherwise the tests above prove
 /// nothing. Flipping one satoshi in an output value invalidates the preimage
 /// without touching the signature.
 #[test]
@@ -411,12 +179,12 @@ fn verifier_rejects_a_tampered_output_value() {
 
     assert!(
         panicked,
-        "verifier accepted a transaction whose output value was changed after signing — the \
+        "verifier accepted a transaction whose output value was changed after signing: the \
          harness is not actually checking the signature"
     );
 }
 
-/// Negative control for recipient substitution — the failure mode that costs
+/// Negative control for recipient substitution: the failure mode that costs
 /// money. Redirecting an output to a different address must invalidate the
 /// signature.
 #[test]
@@ -466,8 +234,8 @@ fn distinct_addresses(bip39_seed: &[u8], n: u32) -> Vec<String> {
 /// signature must commit to all four outputs, and each must carry exactly the
 /// requested amount to exactly the requested address, in the requested order.
 ///
-/// This is the case Erik's commission split needs — paying a seller and a
-/// referrer from one transaction — and paying the wrong split is the failure
+/// This is the case Erik's commission split needs: paying a seller and a
+/// referrer from one transaction, and paying the wrong split is the failure
 /// that costs money.
 #[test]
 fn multi_recipient_signature_commits_to_every_output() {
@@ -498,7 +266,7 @@ fn multi_recipient_signature_commits_to_every_output() {
         let expected_script = keys::address_to_p2pkh_script(&r.address).unwrap();
         assert_eq!(
             tx.outputs[i].script_pubkey, expected_script,
-            "output {i} pays the wrong address — recipient order was not preserved"
+            "output {i} pays the wrong address: recipient order was not preserved"
         );
         assert_eq!(
             tx.outputs[i].value, r.amount,
@@ -522,7 +290,7 @@ fn multi_recipient_signature_commits_to_every_output() {
     assert_eq!(100_000_000 - out_total, result.fee);
 }
 
-/// Multi-recipient with no change output — exercises a different output count
+/// Multi-recipient with no change output: exercises a different output count
 /// in both the preimage and the body.
 #[test]
 fn multi_recipient_without_change() {
@@ -550,7 +318,7 @@ fn multi_recipient_without_change() {
     assert_eq!(result.amount, 100_000_000 - fee);
 }
 
-/// Many recipients across many inputs — the combination most likely to expose
+/// Many recipients across many inputs: the combination most likely to expose
 /// a varint or offset error, since both counts cross out of single-byte range
 /// behaviour in the same transaction.
 #[test]
@@ -591,8 +359,8 @@ fn multi_recipient_multi_input() {
 }
 
 /// Tampering with a *middle* output must invalidate the signature. A sighash
-/// that only committed to the first and last outputs — an easy off-by-one when
-/// generalising from the old fixed two-output shape — would pass every
+/// that only committed to the first and last outputs: an easy off-by-one when
+/// generalising from the old fixed two-output shape: would pass every
 /// positive test above and fail here.
 #[test]
 fn multi_recipient_verifier_rejects_tampering_with_a_middle_output() {
@@ -624,7 +392,7 @@ fn multi_recipient_verifier_rejects_tampering_with_a_middle_output() {
 
     assert!(
         panicked,
-        "signature did not commit to the middle output — a recipient could be swapped without \
+        "signature did not commit to the middle output: a recipient could be swapped without \
          invalidating the transaction"
     );
 }
@@ -685,7 +453,7 @@ fn single_recipient_is_byte_identical_through_both_entry_points() {
 
     assert_eq!(
         legacy.txhex, via_many.txhex,
-        "the multi-recipient path changed single-recipient output — existing callers would see \
+        "the multi-recipient path changed single-recipient output: existing callers would see \
          different transactions"
     );
     assert_eq!(legacy.fee, via_many.fee);
@@ -757,7 +525,7 @@ fn multi_recipient_rejects_invalid_input() {
 /// The output count crosses from a 1-byte varint to the 3-byte `0xfd` form at
 /// 253. That transition happens independently in the sighash preimage and in
 /// the transaction body, so it is the single most likely place for the two to
-/// disagree — and a disagreement is invisible to any check that does not verify
+/// disagree, and a disagreement is invisible to any check that does not verify
 /// the signature.
 #[test]
 fn signature_holds_across_the_output_count_varint_boundary() {
@@ -825,30 +593,111 @@ fn signature_holds_across_the_input_count_varint_boundary() {
     }
 }
 
-/// A single-satoshi output must survive serialization exactly. Network dust
-/// policy is the node's business, but the kit must not silently drop or round it.
+/// Dust recipients are refused. A transaction carrying an output worth less than
+/// it costs to spend is non-standard: `IsStandardTx` rejects it with
+/// `reason = "dust"`, so building one hands the caller bytes no node will
+/// relay. Confirmed against a live node, which answered `-26: dust:`.
 #[test]
-fn dust_output_is_preserved_exactly() {
+fn dust_recipients_are_rejected() {
     let bip39_seed = seed();
     let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
     let utxos = vec![utxo("c", 0, 100_000_000)];
+
+    // 5460 sat for a 25-byte P2PKH script.
+    let threshold = pivx_wallet_kit::fees::dust_threshold(25);
+    assert_eq!(threshold, 5_460, "P2PKH dust threshold changed");
+
+    for amount in [1u64, 100, threshold - 1] {
+        let err = create_raw_transparent_transaction_from_utxos_to_many(
+            &bip39_seed,
+            0,
+            5,
+            &utxos,
+            &[Recipient { address: to.clone(), amount }],
+        )
+        .expect_err("a dust recipient must be rejected")
+        .to_string();
+        assert!(err.contains("dust"), "amount {amount}: got {err}");
+    }
+
+    // Exactly at the threshold is fine, and still signs correctly.
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed,
+        0,
+        5,
+        &utxos,
+        &[Recipient { address: to, amount: threshold }],
+    )
+    .expect("the threshold itself is not dust");
+
+    let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+    assert_eq!(tx.outputs[0].value, threshold);
+    assert_eq!(verify_all_signatures(&tx), 1);
+}
+
+/// Dust *change* is dropped rather than emitted, since keeping it would make the
+/// transaction unrelayable. The dropped value goes to the miner, so the fee the
+/// result reports must be the fee actually paid, not the estimate.
+#[test]
+fn dust_change_is_absorbed_into_the_fee() {
+    let bip39_seed = seed();
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let total = 100_000_000u64;
+    let utxos = vec![utxo("d", 0, total)];
+
+    // Aim to leave 1000 sat of change: well under the 5460 threshold.
+    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2);
+    let amount = total - fee - 1_000;
 
     let result = create_raw_transparent_transaction_from_utxos_to_many(
         &bip39_seed,
         0,
         5,
         &utxos,
-        &[Recipient { address: to, amount: 1 }],
+        &[Recipient { address: to, amount }],
+    )
+    .expect("dust change should be dropped, not rejected");
+
+    let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
+    assert_eq!(tx.outputs.len(), 1, "the dust change output must not be emitted");
+    assert_eq!(tx.outputs[0].value, amount);
+
+    // The reported fee absorbs the dropped change.
+    assert_eq!(result.fee, fee + 1_000, "reported fee should include the absorbed dust");
+    assert_eq!(total - amount, result.fee, "value must still be conserved");
+    assert_eq!(verify_all_signatures(&tx), 1);
+}
+
+/// Non-dust change is still emitted normally.
+#[test]
+fn non_dust_change_is_emitted() {
+    let bip39_seed = seed();
+    let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
+    let total = 100_000_000u64;
+    let utxos = vec![utxo("e", 0, total)];
+
+    let fee = pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2);
+    let change = 10_000u64; // comfortably above 5460
+    let amount = total - fee - change;
+
+    let result = create_raw_transparent_transaction_from_utxos_to_many(
+        &bip39_seed,
+        0,
+        5,
+        &utxos,
+        &[Recipient { address: to, amount }],
     )
     .unwrap();
 
     let tx = parse_tx(&simd::hex::hex_string_to_bytes(&result.txhex));
-    assert_eq!(tx.outputs[0].value, 1, "1 sat output must round-trip exactly");
+    assert_eq!(tx.outputs.len(), 2);
+    assert_eq!(tx.outputs[1].value, change);
+    assert_eq!(result.fee, fee);
     assert_eq!(verify_all_signatures(&tx), 1);
 }
 
 /// A repeated outpoint must be refused. `parse_blockbook_utxos` collapses
-/// duplicates, but the from-UTXOs builders bypass the parser entirely — the
+/// duplicates, but the from-UTXOs builders bypass the parser entirely: the
 /// caller hands in an exact set and every one of them is spent. Pre-fix this
 /// built a transaction spending one output twice while claiming double its
 /// value.
@@ -898,7 +747,7 @@ fn rejects_duplicate_outpoints_in_a_caller_supplied_set() {
 }
 
 /// The parser must consume exactly the bytes the builder emitted. Catches
-/// length-prefix drift — a varint written for the wrong count, or a script
+/// length-prefix drift: a varint written for the wrong count, or a script
 /// length that disagrees with the script that follows.
 #[test]
 fn serialized_transaction_has_no_trailing_or_missing_bytes() {

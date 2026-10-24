@@ -1,14 +1,14 @@
 # NOTE: Cargo.lock is intentionally committed despite this being a
 # library crate. `core2 = 0.3.3` is yanked from crates.io and is a
-# transitive dep of librustpivx — building from a fresh resolver
+# transitive dep of librustpivx: building from a fresh resolver
 # without the lock would fail. Drop the lock once librustpivx
 # releases a build that doesn't pull yanked core2 (or once we patch
 # it via [patch.crates-io] to a non-yanked source).
 [package]
 name = "pivx-wallet-kit"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "PIVX Wallet Kit — pure-Rust wallet primitives with Sapling shield support, WASM-ready"
+description = "PIVX Wallet Kit: pure-Rust wallet primitives with Sapling shield support, WASM-ready"
 repository = "https://github.com/PIVX-Labs/pivx-wallet-kit"
 license = "MIT"
 
@@ -27,7 +27,7 @@ path = "examples/sign.rs"
 # instructions (memory.copy) on stable since 2024.
 wasm-opt = [
     "-O",
-    # `-O` (= -O3) optimizes for speed-with-some-size — right for a
+    # `-O` (= -O3) optimizes for speed-with-some-size: right for a
     # crypto kit where Groth16 proving dominates runtime cost. Do NOT
     # downgrade to -Os/-Oz: shaving wasm size by 10% at the cost of
     # making every shield-send 30%+ slower is a bad trade.
@@ -53,7 +53,7 @@ wasm-opt = [
 # threadless wasm build spins forever waiting for worker threads that
 # can't exist, so a shield proof that takes ~0.35s natively never returns
 # in a browser. librustpivx's own workspace already pins both crates with
-# `default-features = false` for this reason — omitting it here silently
+# `default-features = false` for this reason: omitting it here silently
 # re-enabled multicore for every consumer of the published wasm.
 # Parallel proving is still available behind our `multicore` feature,
 # which turns it back on in lockstep with the wasm-bindgen-rayon thread
@@ -64,13 +64,13 @@ pivx_client_backend = { package = "zcash_client_backend", git = "https://github.
 pivx_protocol = { package = "zcash_protocol", git = "https://github.com/Duddino/librustpivx", branch = "librustzcash-rebase", default-features = false }
 zcash_keys = { git = "https://github.com/Duddino/librustpivx", branch = "librustzcash-rebase", features = ["unstable"] }
 zcash_transparent = { git = "https://github.com/Duddino/librustpivx", branch = "librustzcash-rebase" }
-# See the `sapling` note above — `default-features = false` here drops
+# See the `sapling` note above: `default-features = false` here drops
 # bellman's `multicore` default. `features = ["groth16"]` alone did NOT
 # do that: cargo features are additive to defaults, so the explicit
 # groth16 was a no-op and multicore rode in regardless.
 bellman = { git = "https://github.com/Duddino/librustpivx", branch = "librustzcash-rebase", default-features = false, features = ["groth16"] }
 zcash_note_encryption = "0.4"
-# Direct dep is unavoidable — `pivx_primitives::merkle_tree::read_commitment_tree`
+# Direct dep is unavoidable: `pivx_primitives::merkle_tree::read_commitment_tree`
 # returns `CommitmentTree` and `IncrementalWitness` from this crate, but
 # pivx_primitives doesn't re-export the types. Cargo's resolver dedupes
 # to a single instance as long as our requirement and pivx_primitives'
@@ -110,7 +110,7 @@ serde-wasm-bindgen = "0.6"
 # `js` feature wires up to wasm-bindgen on the wasm32 target.
 tsify = { version = "0.4", default-features = false, features = ["js"] }
 
-# wasm-bindgen-rayon only builds for wasm32 — scoping it to the target
+# wasm-bindgen-rayon only builds for wasm32: scoping it to the target
 # keeps `--features multicore` usable on native, where enabling multicore
 # means "let bellman use rayon directly" and no JS thread pool exists.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -131,7 +131,7 @@ default = []
 # On wasm32, consumers enabling this also need a nightly toolchain with
 # `-Z build-std`, the atomics/bulk-memory target features, and COOP/COEP
 # headers on the serving origin, then must call `initThreadPool` before
-# proving. Without that setup, leave this off — the default single-
+# proving. Without that setup, leave this off: the default single-
 # threaded build proves in ~6s in-browser, which is slower than native
 # but always returns.
 multicore = ["dep:wasm-bindgen-rayon", "sapling/multicore", "bellman/multicore"]
@@ -142,7 +142,7 @@ multicore = ["dep:wasm-bindgen-rayon", "sapling/multicore", "bellman/multicore"]
 #   doesn't compile against the rebased librustzcash branch we use.
 #   Don't drop this patch unless / until librustpivx stops pulling
 #   orchard.
-# - `redjubjub` and `bellman` are pinned for the same reason — keeping
+# - `redjubjub` and `bellman` are pinned for the same reason: keeping
 #   their versions in lockstep with librustpivx's expectations.
 [patch.crates-io]
 orchard = { git = "https://github.com/zcash/orchard.git", rev = "c684e9185a0449efb00428f807d3bf286b5dae03" }

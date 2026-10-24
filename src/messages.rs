@@ -139,7 +139,7 @@ pub fn verify_message(
 mod tests {
     use super::*;
 
-    /// Round-trip — sign with a key, verify with the corresponding address.
+    /// Round-trip: sign with a key, verify with the corresponding address.
     #[test]
     fn roundtrip_compressed() {
         // Deterministic mnemonic → known address + privkey

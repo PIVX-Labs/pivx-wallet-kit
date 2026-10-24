@@ -26,15 +26,71 @@ fn read_u32_le(reader: &mut dyn Read) -> Result<Option<u32>, Box<dyn Error>> {
     }
 }
 
+/// How a stream associates transaction packets with the block they belong to.
+///
+/// Nothing in a transaction packet names its block. The association is purely
+/// positional, relative to the `0x5d` markers, and there are two conventions
+/// for it:
+///
+/// ```text
+/// Header:   M(h1) tx tx   M(h2) tx      marker opens the block it labels
+/// Footer:   tx tx M(h1)   tx M(h2)      marker closes the block it labels
+/// ```
+///
+/// A marker is otherwise identical in both, so the framing has to be settled
+/// before any transaction can be placed. The marker's payload length settles
+/// it: a footer carries a trailing timestamp and a header does not.
+///
+/// This used to be inferred per packet, from whether any transaction happened
+/// to be buffered at the time. That inference is right for the first marker of
+/// a footer-framed stream and wrong for every packet after it, because the
+/// first marker empties the buffer and the buffer never refills. Every
+/// transaction then attached to the block before the one it belonged to. The
+/// commitment tree still came out correct, since it depends only on the order
+/// commitments are appended, so the fault was invisible until something read a
+/// height.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Framing {
+    /// `0x5d` + 4-byte height. The marker precedes its transactions.
+    Header,
+    /// `0x5d` + 4-byte height + 4-byte time. The marker follows its
+    /// transactions. This is what PIVX Core's `getshielddata` serves, on both
+    /// its default and its `format=compact` responses.
+    Footer,
+}
+
+const HEADER_MARKER_LEN: usize = 5;
+const FOOTER_MARKER_LEN: usize = 9;
+
+impl Framing {
+    fn from_marker_len(len: usize) -> Result<Self, Box<dyn Error>> {
+        match len {
+            HEADER_MARKER_LEN => Ok(Framing::Header),
+            FOOTER_MARKER_LEN => Ok(Framing::Footer),
+            other => Err(format!(
+                "Block marker is {other} bytes; expected {HEADER_MARKER_LEN} (header framing) \
+                 or {FOOTER_MARKER_LEN} (footer framing)"
+            )
+            .into()),
+        }
+    }
+}
+
 /// Parse the next batch of shield blocks from the binary stream.
 ///
 /// Wire format:
 /// ```text
 /// [4-byte LE length][payload]
-///   payload[0] == 0x5d  → block marker (header before txs OR footer after)
-///   payload[0] == 0x03  → full raw tx (PivxNodeController compat)
-///   payload[0] == 0x04  → compact tx (default)
+///   payload[0] == 0x5d  → block marker; see [`Framing`] for header vs footer
+///   payload[0] == 0x03  → full raw tx (this is the tx's own version field,
+///                         not a tag, so the whole payload is the transaction)
+///   payload[0] == 0x04  → compact tx (a real tag, stripped by the decoder)
 /// ```
+///
+/// The framing is decided once, from the first marker, and held for the rest
+/// of the call. A later marker that disagrees is an error rather than a silent
+/// switch: mixing the two conventions in one stream has no correct reading, and
+/// guessing per packet is exactly the bug this replaced.
 ///
 /// Returns `Ok(None)` when the stream has no more complete blocks.
 pub fn parse_next_blocks(
@@ -43,6 +99,7 @@ pub fn parse_next_blocks(
 ) -> Result<Option<Vec<ShieldBlock>>, Box<dyn Error>> {
     let mut txs: Vec<Vec<u8>> = vec![];
     let mut blocks: Vec<ShieldBlock> = vec![];
+    let mut framing: Option<Framing> = None;
 
     while blocks.len() < max_blocks {
         let length = match read_u32_le(reader)? {
@@ -65,27 +122,46 @@ pub fn parse_next_blocks(
         reader.read_exact(&mut payload)?;
 
         match payload[0] {
-            0x5d if !txs.is_empty() => {
-                // PivxNodeController-compat: block footer AFTER txs (9 bytes with time).
-                let height = u32::from_le_bytes(payload[1..5].try_into()?);
-                blocks.push(ShieldBlock {
-                    height,
-                    txs: std::mem::take(&mut txs),
-                });
-            }
             0x5d => {
-                // Compact format: block header BEFORE txs (5 bytes).
-                let height = u32::from_le_bytes(payload[1..5].try_into()?);
-                blocks.push(ShieldBlock { height, txs: vec![] });
-            }
-            0x03 | 0x04 => {
-                if let Some(last) = blocks.last_mut() {
-                    last.txs.push(payload);
-                } else {
-                    // PivxNodeController-compat: txs arrive before the footer.
-                    txs.push(payload);
+                let seen = Framing::from_marker_len(payload.len())?;
+                match framing {
+                    None => framing = Some(seen),
+                    Some(locked) if locked != seen => {
+                        return Err(format!(
+                            "Shield stream changes framing mid-batch: started {locked:?}, \
+                             then saw a {seen:?} marker"
+                        )
+                        .into());
+                    }
+                    Some(_) => {}
                 }
+
+                // Safe for both: `from_marker_len` accepted the length, and
+                // both layouts carry the height at the same offset.
+                let height = u32::from_le_bytes(payload[1..5].try_into()?);
+                let txs = match seen {
+                    // Everything buffered since the previous marker belongs to
+                    // this block. An empty buffer means a block with no shield
+                    // transactions, which is a legitimate thing to be told.
+                    Framing::Footer => std::mem::take(&mut txs),
+                    Framing::Header => vec![],
+                };
+                blocks.push(ShieldBlock { height, txs });
             }
+            0x03 | 0x04 => match framing {
+                Some(Framing::Header) => {
+                    blocks
+                        .last_mut()
+                        .ok_or("Transaction packet before any block header")?
+                        .txs
+                        .push(payload);
+                }
+                // Footer framing, or a framing not yet settled. Buffering is
+                // the only correct choice in both cases: under footer framing
+                // the transaction belongs to the marker still to come, and
+                // before the first marker there is no block to attach it to.
+                Some(Framing::Footer) | None => txs.push(payload),
+            },
             other => {
                 return Err(
                     format!("Unknown packet type 0x{:02x} in shield binary stream", other).into(),
@@ -94,14 +170,15 @@ pub fn parse_next_blocks(
         }
     }
 
-    // PivxNodeController-compat path: txs accumulate locally and only
-    // attach to a block on its footer. If the stream ends while txs
-    // are still buffered, the remote sent us a truncated batch — bail
-    // loudly instead of silently dropping whatever we managed to read.
-    // (Compact format never uses this buffer; this guard is a no-op there.)
+    // Footer framing attaches transactions only when their marker arrives, so
+    // anything still buffered is a batch that ended mid-block: the remote cut
+    // us off, or a header-framed stream opened with a transaction. Bail loudly
+    // rather than silently dropping what we read, or worse, attributing it to
+    // whichever block happens to be last.
     if !txs.is_empty() {
         return Err(format!(
-            "shield stream truncated: {} buffered txs without a block footer",
+            "shield stream truncated: {} transaction packet(s) with no block marker to \
+             attach them to",
             txs.len()
         )
         .into());

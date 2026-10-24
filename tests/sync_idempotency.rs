@@ -6,8 +6,8 @@
 //! them no longer match the chain and every spend built afterwards is rejected.
 //!
 //! This was reachable by following the kit's own documented sync pattern.
-//! Applying blocks did not advance `last_block` — only `reset_to_checkpoint` set
-//! it — so a caller syncing from `last_block + 1` re-fetched and re-applied the
+//! Applying blocks did not advance `last_block`: only `reset_to_checkpoint` set
+//! it, so a caller syncing from `last_block + 1` re-fetched and re-applied the
 //! whole range from the checkpoint on every sync after the first.
 
 use pivx_wallet_kit::sapling::sync::{HandleBlocksResult, ShieldBlock, apply_blocks_to_wallet};
@@ -31,7 +31,7 @@ fn block(height: u32) -> ShieldBlock {
     ShieldBlock { height, txs: vec![shield_tx()] }
 }
 
-/// Tree leaf count — what a double-apply corrupts.
+/// Tree leaf count: what a double-apply corrupts.
 fn tree_size(hex: &str) -> usize {
     use ::sapling::Node;
     use incrementalmerkletree::frontier::CommitmentTree;
@@ -74,7 +74,7 @@ fn applying_the_same_block_twice_is_a_no_op() {
     assert_eq!(
         tree_size(&second.commitment_tree),
         size_after_first,
-        "the commitment tree grew on re-apply — every witness position is now wrong"
+        "the commitment tree grew on re-apply: every witness position is now wrong"
     );
     assert_eq!(w.unspent_notes.len(), notes_after_first, "notes duplicated on re-apply");
     assert_eq!(w.last_block, height as i32, "cursor moved on a no-op apply");
@@ -112,7 +112,7 @@ fn only_blocks_above_the_cursor_are_applied() {
     );
 }
 
-/// A batch mixing already-seen and new heights must apply only the new ones —
+/// A batch mixing already-seen and new heights must apply only the new ones:
 /// the realistic shape of a re-fetch with overlap.
 #[test]
 fn a_partially_overlapping_batch_applies_only_the_new_blocks() {
@@ -176,7 +176,7 @@ fn an_empty_batch_reports_current_state() {
     assert_eq!(r.commitment_tree, tree_before, "should echo the current tree");
 }
 
-/// A batch containing only stale blocks is equally a no-op — the path where the
+/// A batch containing only stale blocks is equally a no-op: the path where the
 /// filter removes everything must not be mistaken for "nothing supplied".
 #[test]
 fn a_wholly_stale_batch_is_a_no_op() {

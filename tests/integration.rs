@@ -1,8 +1,8 @@
 //! Integration tests exercising the kit against real PIVX mainnet transactions.
 //!
 //! Fixtures in `tests/fixtures/` are raw tx hex pulled from Blockbook:
-//! - `tx_transparent.hex` — `c6ff49f9...` (shield → transparent, 1 sapling spend, 1 transparent output)
-//! - `tx_shield.hex`      — `69dc1691...` (pure shield, 1 spend + 2 outputs, ~0.024 PIV fee)
+//! - `tx_transparent.hex`: `c6ff49f9...` (shield → transparent, 1 sapling spend, 1 transparent output)
+//! - `tx_shield.hex`     : `69dc1691...` (pure shield, 1 spend + 2 outputs, ~0.024 PIV fee)
 //!
 //! These are *real* on-chain txs; they let us verify parsing, tree updates,
 //! and (where applicable) the full shield handling pipeline without needing
@@ -81,7 +81,7 @@ fn checkpoint_latest_is_reachable() {
 // Key derivation
 // ---------------------------------------------------------------------------
 
-/// BIP39 test vector — a known mnemonic whose transparent address we can verify derives consistently.
+/// BIP39 test vector: a known mnemonic whose transparent address we can verify derives consistently.
 const TEST_MNEMONIC: &str =
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
@@ -94,7 +94,7 @@ fn derive_transparent_address_from_mnemonic() {
         addr
     );
     assert_eq!(addr.len(), 34, "PIVX address should be 34 chars, got: {}", addr.len());
-    // Deterministic — derive twice, expect identical.
+    // Deterministic: derive twice, expect identical.
     let addr2 = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
     assert_eq!(addr, addr2);
 }
@@ -149,7 +149,7 @@ fn shield_address_at_zero_matches_default_address() {
 
 #[test]
 fn shield_address_at_is_deterministic() {
-    // Calling twice with the same input must yield the same output —
+    // Calling twice with the same input must yield the same output:
     // critical for any database that stores the address and later expects
     // to re-derive the spending key from the index.
     let extfvk = encoded_extfvk_for_test_mnemonic();
@@ -267,7 +267,7 @@ fn wallet_decrypt_wrong_key_does_not_corrupt_state() {
     let wrong_key = [0x99u8; 32];
     let _ = wallet::decrypt_secrets(&mut w, &wrong_key);
 
-    // State should be untouched — mnemonic still the encrypted hex string.
+    // State should be untouched: mnemonic still the encrypted hex string.
     assert_eq!(w.get_mnemonic(), encrypted_mnemonic);
 
     // Retry with the right key should now succeed cleanly.
@@ -414,7 +414,7 @@ fn parse_blockbook_utxos_handles_string_and_number_values() {
     assert_eq!(utxos[1].vout, 2);
 }
 
-/// Blockbook lists the same UTXO twice while a transaction is confirming —
+/// Blockbook lists the same UTXO twice while a transaction is confirming,
 /// once from its mempool view (height 0) and once as confirmed. Observed
 /// live on mainnet. Ingesting both doubles the apparent balance and makes the
 /// builder spend one outpoint twice, which the network rejects.
@@ -455,7 +455,7 @@ fn parse_blockbook_utxos_deduplicates_outpoints() {
 }
 
 /// Distinct vouts of the same txid are different outpoints and must both
-/// survive — the dedupe must key on (txid, vout), not txid alone.
+/// survive: the dedupe must key on (txid, vout), not txid alone.
 #[test]
 fn parse_blockbook_utxos_keeps_distinct_vouts_of_one_txid() {
     let txid = "a".repeat(64);
@@ -466,6 +466,144 @@ fn parse_blockbook_utxos_keeps_distinct_vouts_of_one_txid() {
     let parsed = wallet::parse_blockbook_utxos(&raw);
     assert_eq!(parsed.len(), 5, "distinct vouts must not be collapsed");
     assert_eq!(parsed.iter().map(|u| u.amount).sum::<u64>(), 5_000);
+}
+
+/// The script is what makes a delegation visible, and it only reaches the
+/// parser because the caller joined `/api/v2/tx/{txid}` → `vout[n].hex` onto the
+/// entry. It arrives under whichever name the caller reached for, so all three
+/// spellings are accepted, including Core's verbose-RPC object form.
+///
+/// The P2CS script here is the real one from mainnet tx `7e4dc5b0…` vout 0.
+#[test]
+fn parse_blockbook_utxos_keeps_a_joined_script() {
+    const P2CS: &str = "76a97b63d1146d4b7c154c916817fe70c4f1f2d7959660ec72d367146d4b7c154c916817fe70c4f1f2d7959660ec72d36888ac";
+    const P2PKH: &str = "76a9146d4b7c154c916817fe70c4f1f2d7959660ec72d388ac";
+
+    let raw = vec![
+        serde_json::json!({
+            "txid": "a".repeat(64), "vout": 0, "value": "1", "height": 1,
+            "script": P2CS,
+        }),
+        // `hex` is the field's name on the tx endpoint it gets copied from.
+        serde_json::json!({
+            "txid": "b".repeat(64), "vout": 0, "value": "1", "height": 1,
+            "hex": P2PKH,
+        }),
+        serde_json::json!({
+            "txid": "c".repeat(64), "vout": 0, "value": "1", "height": 1,
+            "scriptPubKey": P2CS,
+        }),
+        // Core's `getrawtransaction` verbose shape nests it.
+        serde_json::json!({
+            "txid": "d".repeat(64), "vout": 0, "value": "1", "height": 1,
+            "scriptPubKey": { "hex": P2CS, "asm": "OP_DUP OP_HASH160 OP_ROT" },
+        }),
+    ];
+
+    let parsed = wallet::parse_blockbook_utxos(&raw);
+    assert_eq!(parsed.len(), 4);
+    let scripts: Vec<&str> = parsed.iter().map(|u| u.script.as_str()).collect();
+    assert_eq!(scripts, [P2CS, P2PKH, P2CS, P2CS]);
+
+    let delegated: Vec<bool> = parsed.iter().map(wallet::is_delegated_utxo).collect();
+    assert_eq!(
+        delegated,
+        [true, false, true, true],
+        "a joined P2CS script must make the delegation visible"
+    );
+}
+
+/// `hex_string_to_bytes` is an unchecked SIMD decoder, so a malformed script
+/// must be dropped at the parse boundary rather than classified on garbage.
+/// Empty reads as "unknown", which `is_delegated_utxo` treats as ordinary.
+#[test]
+fn parse_blockbook_utxos_drops_a_malformed_script() {
+    let cases = [
+        serde_json::json!("76a9146d4b7c154c916817fe70c4f1f2d7959660ec72d388a"), // odd length
+        serde_json::json!("76a914zzzz"),                                        // not hex
+        serde_json::json!(""),
+        serde_json::json!(76),   // wrong JSON type
+        serde_json::json!(null), // explicit null
+    ];
+
+    for (i, script) in cases.iter().enumerate() {
+        let raw = vec![serde_json::json!({
+            "txid": "a".repeat(64), "vout": 0, "value": "1", "height": 1,
+            "script": script,
+        })];
+        let parsed = wallet::parse_blockbook_utxos(&raw);
+        assert_eq!(parsed.len(), 1, "case {i}: the UTXO itself must survive");
+        assert!(parsed[0].script.is_empty(), "case {i}: {script} must not be kept");
+    }
+}
+
+/// Staking a delegation consumes it and recreates it inside a coinstake
+/// transaction, so the *steady state* of a live delegation is a coinstake
+/// output, not the original delegation. Consensus makes the staker reproduce the
+/// identical `scriptPubKey`, so the delegation must still be recognised.
+///
+/// The fixture is the real shape from mainnet: a coinstake's zero-value marker
+/// output at vout 0 (a 1-byte `f8` script, which is valid hex and would parse),
+/// then the recreated P2CS at vout 1. Verified against a live owner address
+/// whose 100 UTXOs were 99 coinstake-derived delegations sharing one script.
+#[test]
+fn parse_blockbook_utxos_reads_a_staked_delegation() {
+    // Block 5531445, staking SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy for owner
+    // D73WnKZ4aEQE9WqsGLYX7D8yff6jjYcnic.
+    const STAKED: &str = "76a97b63d114b3be8567d0190c67ca4675a0019089c55fe695f9671414e1fe0c6e2bcceda58bc7c0a3055907aaa561e56888ac";
+    let txid = "cf0cbc0816d9306ccb52c6ae2cf4a2ca4dcf1aaa44b429775d94e91bc2a0427c";
+
+    let raw = vec![
+        // The coinstake marker: value 0, so it is not a UTXO at all.
+        serde_json::json!({ "txid": txid, "vout": 0, "value": "0", "height": 5_531_445, "script": "f8" }),
+        serde_json::json!({ "txid": txid, "vout": 1, "value": "51600000000", "height": 5_531_445, "script": STAKED }),
+    ];
+
+    let parsed = wallet::parse_blockbook_utxos(&raw);
+    assert_eq!(parsed.len(), 1, "the zero-value coinstake marker must be skipped");
+    assert_eq!(parsed[0].vout, 1, "the join must not shift with vout 0 dropped");
+    assert!(
+        wallet::is_delegated_utxo(&parsed[0]),
+        "a restaked delegation must still read as delegated"
+    );
+
+    // Cross-check against what the explorer independently reported for this
+    // output: it lists both addresses, staker first.
+    let bytes = pivx_wallet_kit::simd::hex::hex_string_to_bytes(&parsed[0].script);
+    let (staking, owner) =
+        pivx_wallet_kit::transparent::coldstake::addresses_from_p2cs_script(&bytes).unwrap();
+    assert_eq!(staking, "SdgQDpS8jDRJDX8yK8m9KnTMarsE84zdsy");
+    assert_eq!(owner, "D73WnKZ4aEQE9WqsGLYX7D8yff6jjYcnic");
+}
+
+/// A caller joining scripts on may only have covered one of the two sightings
+/// the explorer emits mid-confirmation. Losing the script to the dedupe would
+/// hide a delegation, so the non-empty one must win regardless of which
+/// sighting carried it.
+#[test]
+fn parse_blockbook_utxos_dedupe_keeps_the_known_script() {
+    const P2CS: &str = "76a97b63d1146d4b7c154c916817fe70c4f1f2d7959660ec72d367146d4b7c154c916817fe70c4f1f2d7959660ec72d36888ac";
+    let txid = "a".repeat(64);
+
+    // Script on the second sighting, then on the first: order must not matter.
+    for scripts in [["", P2CS], [P2CS, ""]] {
+        let raw: Vec<serde_json::Value> = scripts
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                serde_json::json!({
+                    "txid": txid, "vout": 4, "value": "1000",
+                    "height": if i == 0 { 0 } else { 5_519_222 },
+                    "script": s,
+                })
+            })
+            .collect();
+
+        let parsed = wallet::parse_blockbook_utxos(&raw);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].script, P2CS, "the known script must survive the dedupe");
+        assert!(wallet::is_delegated_utxo(&parsed[0]));
+    }
 }
 
 #[test]
@@ -582,11 +720,11 @@ fn handle_blocks_with_unrelated_key_advances_tree_and_extracts_nullifier() {
 
     let tx_bytes = decode_fixture(TX_SHIELD_HEX);
 
-    // Derive a random extfvk from a throwaway mnemonic — guaranteed not to be
+    // Derive a random extfvk from a throwaway mnemonic: guaranteed not to be
     // the actual recipient of this tx.
     let random = wallet::import_wallet(TEST_MNEMONIC, 5_000_000).unwrap();
 
-    // Start with the empty tree (just to exercise the path — the real tree
+    // Start with the empty tree (just to exercise the path: the real tree
     // would be one from just before this tx's block).
     let tree_hex = checkpoints::MAINNET_CHECKPOINTS[0].1;
     let block = sapling::sync::ShieldBlock {
@@ -602,7 +740,7 @@ fn handle_blocks_with_unrelated_key_advances_tree_and_extracts_nullifier() {
     // But the spend nullifier should have been surfaced.
     assert_eq!(result.nullifiers.len(), 1);
 
-    // Tree must advance by exactly 2 leaves — the tx has 2 shielded outputs.
+    // Tree must advance by exactly 2 leaves: the tx has 2 shielded outputs.
     let parse_tree = |hex: &str| -> u64 {
         let bytes = simd::hex::hex_string_to_bytes(hex);
         let tree: CommitmentTree<Node, 32> = read_commitment_tree(Cursor::new(bytes)).unwrap();
@@ -650,7 +788,7 @@ fn handle_blocks_processes_real_transparent_tx_without_notes() {
 /// The kit must let consumers build pure transparent→transparent transactions
 /// without ever loading the Sapling prover. Enforced by this test, which
 /// constructs a wallet with a synthetic transparent UTXO and drives the raw
-/// v1 P2PKH path — if the kit ever accidentally re-requires a prover here,
+/// v1 P2PKH path, if the kit ever accidentally re-requires a prover here,
 /// this test will fail because we pass `None`.
 #[test]
 fn transparent_to_transparent_tx_needs_no_prover() {
@@ -668,9 +806,10 @@ fn transparent_to_transparent_tx_needs_no_prover() {
         amount: 500_000_000, // 5 PIV
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     });
 
-    // Destination is the same wallet's transparent address — guaranteed to
+    // Destination is the same wallet's transparent address: guaranteed to
     // be a `D...` address, triggering the raw v1 path.
     let dest = w.get_transparent_address().unwrap();
 
@@ -679,8 +818,8 @@ fn transparent_to_transparent_tx_needs_no_prover() {
         &bip39_seed,
         &dest,
         100_000_000, // 1 PIV
-        0,           // block_height_for_shield — unused for transparent dest
-        None,        // prover_for_shield — unused for transparent dest
+        0,           // block_height_for_shield: unused for transparent dest
+        None,        // prover_for_shield: unused for transparent dest
     )
     .expect("pure transparent tx should build without prover");
 
@@ -704,7 +843,7 @@ fn raw_transparent_from_utxos_signs_with_custom_hd_index() {
     let mnemonic = bip39::Mnemonic::parse_normalized(TEST_MNEMONIC).unwrap();
     let bip39_seed = mnemonic.to_seed("");
 
-    // Derive the address at HD index 5 — what a consumer that maintains
+    // Derive the address at HD index 5: what a consumer that maintains
     // multiple receive addresses would use as a source.
     let (from_addr, _pubkey, _privkey) =
         keys::transparent_key_from_bip39_seed(&bip39_seed, 0, 5).unwrap();
@@ -716,6 +855,7 @@ fn raw_transparent_from_utxos_signs_with_custom_hd_index() {
         amount: 100_000_000, // 1 PIV
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }];
 
     // Send 0.5 PIV to a different address; the rest is fee + change
@@ -763,6 +903,7 @@ fn raw_transparent_from_utxos_full_amount_has_no_change_output() {
         amount: 100_000_000,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }];
     let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
 
@@ -772,7 +913,7 @@ fn raw_transparent_from_utxos_full_amount_has_no_change_output() {
         3,
         &utxos,
         &to,
-        // Pass total - fee so change is exactly 0 — the typical
+        // Pass total - fee so change is exactly 0: the typical
         // "send everything" path.
         100_000_000 - pivx_wallet_kit::fees::estimate_raw_transparent_fee(1, 2),
     )
@@ -814,6 +955,7 @@ fn raw_transparent_from_utxos_insufficient_balance_fails() {
         amount: 1_000,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     }];
     let to = keys::get_transparent_address(TEST_MNEMONIC).unwrap();
     let err = create_raw_transparent_transaction_from_utxos(
@@ -827,7 +969,7 @@ fn raw_transparent_from_utxos_insufficient_balance_fails() {
     assert!(err.is_err(), "should reject when UTXOs < amount + fee");
 }
 
-/// Small helper — finds a needle byte slice anywhere inside a haystack.
+/// Small helper: finds a needle byte slice anywhere inside a haystack.
 /// Avoids pulling in a crate just for this.
 fn windows_contains(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() || needle.len() > haystack.len() {
@@ -852,6 +994,7 @@ fn transparent_to_shield_requires_prover() {
         amount: 500_000_000,
         script: String::new(),
         height: 5_000_000,
+        ..Default::default()
     });
 
     // Destination is a shield address; prover_for_shield = None must error.
@@ -883,6 +1026,12 @@ fn is_empty_tree_hex_accepts_all_known_empty_forms() {
     assert!(!sapling::tree::is_empty_tree_hex(populated));
 }
 
+/// Header framing, which PIVX Core's `getshielddata` does *not* serve: it sends
+/// footer-framed, 9-byte markers on both its default and `format=compact`
+/// responses. Kept because the parser still supports both, but the framing the
+/// node actually serves is covered in `tests/shield_stream_framing.rs`, against
+/// a recorded mainnet response. Testing only this shape is how a one-block
+/// attribution shift shipped unnoticed.
 #[test]
 fn parse_shield_stream_synthetic_compact() {
     // Hand-craft a minimal valid stream: [block header(0x5d + height)][tx(0x04 + 0 spends + 0 outputs)].
@@ -951,7 +1100,7 @@ fn parse_shield_stream_rejects_unknown_type() {
 /// `unspent_notes` after the merge-and-finalize pass that the wasm
 /// wrapper performs (`Wallet::apply_blocks` in `src/wasm.rs`).
 ///
-/// `handle_blocks` itself does not filter spent own notes — it
+/// `handle_blocks` itself does not filter spent own notes: it
 /// returns `updated_notes` containing every input note (witnesses
 /// advanced) regardless of nullifier matches, and `nullifiers`
 /// containing every nullifier seen in the batch. The wasm wrapper
@@ -1004,7 +1153,7 @@ fn apply_blocks_sequence_filters_spent_own_notes() {
 /// malformed tx), the wasm wrapper's clone-then-pass strategy means
 /// `wallet.unspent_notes` is left untouched.
 ///
-/// Hands `handle_blocks` a tx with empty bytes — its first-byte tag
+/// Hands `handle_blocks` a tx with empty bytes: its first-byte tag
 /// read returns `None`, surfacing as `"empty tx bytes in shield block"`.
 /// The test mirrors the wasm wrapper's exact clone-and-call sequence
 /// and verifies the wallet's unspent_notes are byte-for-byte intact.
@@ -1026,7 +1175,7 @@ fn apply_blocks_error_path_preserves_state() {
 
     // Malformed input: empty tx bytes triggers the
     // "empty tx bytes in shield block" error inside handle_blocks
-    // *after* it consumes the existing-notes clone — exactly the
+    // *after* it consumes the existing-notes clone: exactly the
     // production failure mode the clone-defense protects against.
     let bad_block = pivx_wallet_kit::sapling::sync::ShieldBlock {
         height: 1,
@@ -1047,7 +1196,7 @@ fn apply_blocks_error_path_preserves_state() {
     );
     assert!(result.is_err(), "expected handle_blocks to error on empty tx bytes");
 
-    // The wrapper does NOT replace state on error — so the sentinel
+    // The wrapper does NOT replace state on error, so the sentinel
     // note must still be present unchanged. Without the clone-defense
     // (i.e., if mem::take were used), this would now be empty.
     assert_eq!(w.unspent_notes.len(), 1);

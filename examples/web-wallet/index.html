@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PIVX Wallet Kit — tiny demo</title>
+  <title>PIVX Wallet Kit: tiny demo</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -70,11 +70,11 @@
   </style>
 </head>
 <body>
-  <h1>PIVX Wallet Kit — Demo</h1>
+  <h1>PIVX Wallet Kit: Demo</h1>
   <p class="muted">
     A ~100-line example of using
     <a href="https://github.com/PIVX-Labs/pivx-wallet-kit" target="_blank">pivx-wallet-kit</a>
-    in the browser. All wallet operations run client-side via WebAssembly —
+    in the browser. All wallet operations run client-side via WebAssembly:
     the only network call is an optional Blockbook UTXO fetch.
   </p>
 
@@ -102,7 +102,7 @@
     <p class="muted">
       Streams compact Sapling blocks from a PIVX bridge, decrypts your notes
       with the viewing key in WASM, and sums the spendable balance. Starts at
-      the wallet's embedded checkpoint — a fresh wallet is already near the
+      the wallet's embedded checkpoint: a fresh wallet is already near the
       chain tip because <code>import_wallet</code> was called with the current
       block height, so sync completes in seconds.
     </p>
@@ -111,7 +111,7 @@
 
     <h2 style="margin-top: 1.5em">5. Encrypt / decrypt round-trip</h2>
     <p class="muted">
-      The kit derives a 32-byte key from anything the consumer supplies — here, SHA-256 of a passphrase.
+      The kit derives a 32-byte key from anything the consumer supplies: here, SHA-256 of a passphrase.
       After encryption, seed and mnemonic become ciphertext in memory (safe to persist to localStorage,
       IndexedDB, etc.). Wrong-password decryption leaves state untouched.
     </p>
