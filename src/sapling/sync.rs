@@ -106,6 +106,20 @@ impl SpendableNote {
 /// updated set) save one allocation per note. Consumers that only
 /// have a slice should clone before calling: the cost is the same
 /// either way, just relocated to the call site.
+/// Transaction id of a raw serialized transaction: double-SHA256, as the
+/// consensus rules define it.
+///
+/// Computed here rather than by parsing the transaction, because the only
+/// question being asked is whether these exact bytes have been seen before,
+/// and that needs no interpretation of them.
+fn txid_of(raw: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(Sha256::digest(raw));
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
 /// Apply shield blocks to a wallet, advancing its sync cursor.
 ///
 /// Prefer this over calling [`handle_blocks`] and updating `WalletData` by hand:
@@ -143,6 +157,40 @@ pub fn apply_blocks_to_wallet(
             updated_notes: wallet.unspent_notes.clone(),
             nullifiers: Vec::new(),
         });
+    }
+
+    // Drop a transaction the stream has already handed us.
+    //
+    // A txid cannot legitimately appear in two blocks, so a repeat is the data
+    // source being wrong, and trusting it is expensive: every commitment the
+    // duplicate carries enters the tree a second time, every position after it
+    // shifts, and the root stops matching the chain. Notes still decrypt and
+    // balances still look right, so nothing appears wrong until a spend is
+    // built against the bad anchor and the network rejects it. By then the
+    // funds look stuck for no visible reason.
+    //
+    // This is not hypothetical. PIVX's `getshielddata` served
+    // ba5528e825549230fe70e6baac0b13756c8dcfad3122d0ad3c60b03de56be805 twice,
+    // attributed to blocks 5563567 and 5563568, though the chain puts it only
+    // in 5563568 and 5563567 carries no shielded transaction at all. A sync
+    // across that block produced a root that matched nothing, and every shield
+    // spend afterwards was refused with
+    // `bad-txns-shielded-requirements-not-met`. Discarding the repeat restores
+    // an exact match with the node's `finalsaplingroot`.
+    //
+    // Keeping the first occurrence is what makes the tree right: only the
+    // order of commitments matters, not which block they are filed under.
+    // Correcting rather than refusing is deliberate. This crate errors loudly
+    // on malformed input elsewhere, but a duplicate here is a live condition of
+    // a data source wallets depend on, and refusing to sync would make the kit
+    // unusable against it. The duplicate is also unambiguous: identical bytes
+    // can only be the same transaction, and keeping the first occurrence
+    // reproduces the chain's own tree exactly, verified against
+    // `finalsaplingroot`.
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut fresh = fresh;
+    for block in &mut fresh {
+        block.txs.retain(|raw| seen.insert(txid_of(raw)));
     }
 
     let highest = fresh.iter().map(|b| b.height).max();
